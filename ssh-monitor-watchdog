@@ -1,0 +1,152 @@
+#!/bin/bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+CONFIG_FILE="/etc/ssh-monitor.conf"
+WATCHDOG_LOG_FILE="/var/log/ssh_monitor_watchdog.log"
+LAST_HEARTBEAT_FILE="/var/log/last_heartbeat.txt"
+WATCHDOG_MAX_HEARTBEAT_AGE=5400
+WATCHDOG_SERVICE_NAME="ssh-monitor.service"
+WATCHDOG_NOTIFY_ON_RECOVERY="0"
+
+write_log() {
+	local message="$1"
+	local timestamp
+	timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+	echo "${timestamp} - ${message}" | tee -a "$WATCHDOG_LOG_FILE" >/dev/null
+}
+
+send_telegram_raw() {
+	local message="$1"
+	if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+		return 1
+	fi
+
+	local url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+	local body
+	if ! body=$(curl -fsS -X POST "$url" \
+		--data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+		--data-urlencode "text=${message}" \
+		--data-urlencode "parse_mode=HTML" \
+		--max-time 10 2>/dev/null); then
+		return 1
+	fi
+	if echo "$body" | grep -q '"ok":true'; then
+		return 0
+	fi
+	return 1
+}
+
+send_backup_webhook_raw() {
+	local message="$1"
+	if [ -z "${BACKUP_WEBHOOK_URL:-}" ]; then
+		return 1
+	fi
+	if ! command -v python3 >/dev/null 2>&1; then
+		return 1
+	fi
+	local plain
+	plain="$(printf '%s' "$message" | sed 's/%0A/\n/g')"
+	local payload
+	payload="$(BACKUP_MSG="$plain" python3 - <<'PY'
+import json, os
+print(json.dumps({"text": os.environ.get("BACKUP_MSG", "")}))
+PY
+)"
+	if curl -fsS -m 12 -X POST "$BACKUP_WEBHOOK_URL" \
+		-H "Content-Type: application/json" \
+		-d "$payload" >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
+notify_send() {
+	local message="$1"
+	if send_telegram_raw "$message"; then
+		return 0
+	fi
+	if send_backup_webhook_raw "$message"; then
+		write_log "WARN: Telegram недоступен, сообщение watchdog ушло в BACKUP_WEBHOOK_URL"
+		return 0
+	fi
+	write_log "WARN: watchdog: не удалось отправить уведомление"
+	return 1
+}
+
+load_config() {
+	if [ -f "$CONFIG_FILE" ]; then
+		# shellcheck disable=SC1090
+		source "$CONFIG_FILE"
+	fi
+}
+
+is_service_active() {
+	systemctl is-active --quiet "$WATCHDOG_SERVICE_NAME"
+}
+
+heartbeat_age_seconds() {
+	if [ ! -f "$LAST_HEARTBEAT_FILE" ]; then
+		echo 999999
+		return 0
+	fi
+
+	local hb now
+	hb="$(<"$LAST_HEARTBEAT_FILE")"
+	now="$(date '+%s')"
+	if [[ ! "$hb" =~ ^[0-9]+$ ]]; then
+		echo 999999
+		return 0
+	fi
+	echo $((now - hb))
+}
+
+restart_monitor() {
+	local reason="$1"
+	write_log "Watchdog: перезапуск $WATCHDOG_SERVICE_NAME, причина: $reason"
+	if systemctl restart "$WATCHDOG_SERVICE_NAME"; then
+		local msg=" ⚠️ WATCHDOG: монитор перезапущен %0A"
+		msg="${msg}Сервис: ${WATCHDOG_SERVICE_NAME}%0A"
+		msg="${msg}Причина: ${reason}%0A"
+		msg="${msg}Время: $(date '+%d.%m.%Y %H:%M:%S')"
+		notify_send "$msg"
+	else
+		write_log "Watchdog: ошибка перезапуска $WATCHDOG_SERVICE_NAME"
+		local msg=" ❌ WATCHDOG: не удалось перезапустить монитор %0A"
+		msg="${msg}Сервис: ${WATCHDOG_SERVICE_NAME}%0A"
+		msg="${msg}Причина: ${reason}%0A"
+		msg="${msg}Время: $(date '+%d.%m.%Y %H:%M:%S')"
+		notify_send "$msg"
+		return 1
+	fi
+}
+
+main() {
+	if [ "$EUID" -ne 0 ]; then
+		echo "Запустите watchdog от root"
+		exit 1
+	fi
+
+	load_config
+	mkdir -p "$(dirname "$WATCHDOG_LOG_FILE")"
+	touch "$WATCHDOG_LOG_FILE"
+
+	local reason=""
+	if ! is_service_active; then
+		reason="systemd reported inactive service"
+	else
+		local age
+		age="$(heartbeat_age_seconds)"
+		if [ "$age" -ge "${WATCHDOG_MAX_HEARTBEAT_AGE:-5400}" ]; then
+			reason="stale heartbeat (${age}s)"
+		fi
+	fi
+
+	if [ -n "$reason" ]; then
+		restart_monitor "$reason"
+	elif [ "${WATCHDOG_NOTIFY_ON_RECOVERY:-1}" = "1" ]; then
+		write_log "Watchdog: OK, сервис активен и heartbeat актуален"
+	fi
+}
+
+main "$@"

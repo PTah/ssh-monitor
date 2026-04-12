@@ -1,0 +1,40 @@
+TELEGRAM_BOT_TOKEN="replace_with_telegram_bot_token"
+TELEGRAM_CHAT_ID="replace_with_telegram_chat_id"
+
+# Резервный webhook при недоступности Telegram (JSON {"text":"..."}, совместимо со Slack Incoming Webhook)
+BACKUP_WEBHOOK_URL=""
+
+LOG_FILE="/var/log/ssh_monitor.log"
+LAST_HEARTBEAT_FILE="/var/log/last_heartbeat.txt"
+LAST_REPORT_FILE="/var/log/last_daily_report.txt"
+LAST_SSH_CHECK_FILE="/var/log/last_ssh_check"
+LAST_SUDO_CHECK_FILE="/var/log/last_sudo_check"
+LAST_SECURITY_EVENTS_FILE="/var/log/last_security_events_check"
+BAN_LIST_FILE="/var/log/ssh_bans.txt"
+
+DAILY_REPORT_HOUR="9"
+DAILY_REPORT_TOP_IPS="5"
+
+BAN_TIME="3600"
+MAX_ATTEMPTS="3"
+BAN_CHECK_INTERVAL="60"
+MONITOR_INTERVAL="10"
+
+# Окно и порог для уведомления о возможном массовом брутфорсе (journalctl)
+BRUTE_WINDOW_SEC="900"
+BRUTE_MIN_FAILS="30"
+BRUTE_NOTIFY_COOLDOWN_SEC="3600"
+
+# Директория для textfile collector Prometheus (node_exporter). Пусто — отключено.
+PROMETHEUS_TEXTFILE_DIR=""
+
+# JSON-снимок состояния на каждой итерации (timestamp, hostname, dry_run). Пусто — отключено.
+HEALTHCHECK_STATUS_FILE=""
+
+WATCHDOG_MAX_HEARTBEAT_AGE="5400"
+WATCHDOG_LOG_FILE="/var/log/ssh_monitor_watchdog.log"
+WATCHDOG_SERVICE_NAME="ssh-monitor.service"
+WATCHDOG_NOTIFY_ON_RECOVERY="0"
+
+WHITELIST_IPS="127.0.0.1,10.0.0.5"
+WHITELIST_SUBNETS="10.0.0.0/24,192.168.1.0/24"
