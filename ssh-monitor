@@ -26,6 +26,15 @@ DAILY_REPORT_TZ=""
 LAST_SSH_CHECK_FILE="/var/log/last_ssh_check"
 LAST_SUDO_CHECK_FILE="/var/log/last_sudo_check"
 LAST_SECURITY_EVENTS_FILE="/var/log/last_security_events_check"
+LAST_LOGIND_CHECK_FILE="/var/log/last_logind_check"
+
+# systemd-logind (консоль, графика, seat; SSH тоже создаёт сессии — см. LOGIND_SKIP_REMOTE)
+ENABLE_LOGIND_MONITOR=1
+LOGIND_NOTIFY_NEW=1
+LOGIND_NOTIFY_REMOVED=0
+LOGIND_NOTIFY_FAILED=1
+# 1 = не слать Telegram для новых сессий с типом ssh (уведомление уже идёт из monitor_ssh)
+LOGIND_SKIP_REMOTE=1
 
 # Эксплуатация / health
 PROMETHEUS_TEXTFILE_DIR=""
@@ -47,7 +56,7 @@ MONITOR_INTERVAL=10
 BAN_LIST_FILE="/var/log/ssh_bans.txt"
 
 WHITELIST_IPS=(
-	"127.0.0.1"
+ "127.0.0.1"
 )
 
 WHITELIST_SUBNETS=(
@@ -62,138 +71,150 @@ DRY_RUN=0
 SHUTDOWN_NOTIFIED=0
 
 trim_value() {
-	local value="$1"
-	value="${value#"${value%%[![:space:]]*}"}"
-	value="${value%"${value##*[![:space:]]}"}"
-	echo "$value"
+ local value="$1"
+ value="${value#"${value%%[![:space:]]*}"}"
+ value="${value%"${value##*[![:space:]]}"}"
+ echo "$value"
 }
 
 csv_to_array() {
-	local csv="$1"
-	local -n out_ref="$2"
-	local item=""
+ local csv="$1"
+ local -n out_ref="$2"
+ local item=""
 
-	out_ref=()
-	[ -z "$csv" ] && return 0
+ out_ref=()
+ [ -z "$csv" ] && return 0
 
-	IFS=',' read -r -a raw_items <<< "$csv"
-	for item in "${raw_items[@]}"; do
-		item="$(trim_value "$item")"
-		[ -n "$item" ] && out_ref+=("$item")
-	done
+ IFS=',' read -r -a raw_items <<< "$csv"
+ for item in "${raw_items[@]}"; do
+ item="$(trim_value "$item")"
+ [ -n "$item" ] && out_ref+=("$item")
+ done
 }
 
 validate_numeric_or_default() {
-	local name="$1"
-	local default_value="$2"
-	local current_value="${!name:-}"
+ local name="$1"
+ local default_value="$2"
+ local current_value="${!name:-}"
 
-	if [[ "$current_value" =~ ^[0-9]+$ ]] && [ "$current_value" -gt 0 ]; then
-		return 0
-	fi
+ if [[ "$current_value" =~ ^[0-9]+$ ]] && [ "$current_value" -gt 0 ]; then
+ return 0
+ fi
 
-	printf 'WARN: Некорректное значение %s="%s", использую %s\n' "$name" "$current_value" "$default_value" >&2
-	printf -v "$name" '%s' "$default_value"
+ printf 'WARN: Некорректное значение %s="%s", использую %s\n' "$name" "$current_value" "$default_value" >&2
+ printf -v "$name" '%s' "$default_value"
 }
 
 validate_report_hour() {
-	local current_value="${DAILY_REPORT_HOUR:-}"
+ local current_value="${DAILY_REPORT_HOUR:-}"
 
-	if [[ "$current_value" =~ ^[0-9]+$ ]] && [ "$current_value" -ge 0 ] && [ "$current_value" -le 23 ]; then
-		return 0
-	fi
+ if [[ "$current_value" =~ ^[0-9]+$ ]] && [ "$current_value" -ge 0 ] && [ "$current_value" -le 23 ]; then
+ return 0
+ fi
 
-	printf 'WARN: DAILY_REPORT_HOUR="%s" вне диапазона 0..23, использую 9\n' "$current_value" >&2
-	DAILY_REPORT_HOUR=9
+ printf 'WARN: DAILY_REPORT_HOUR="%s" вне диапазона 0..23, использую 9\n' "$current_value" >&2
+ DAILY_REPORT_HOUR=9
 }
 
 load_config() {
-	local default_whitelist_ips_csv
-	local default_whitelist_subnets_csv
-	default_whitelist_ips_csv=$(IFS=','; echo "${WHITELIST_IPS[*]}")
-	default_whitelist_subnets_csv=$(IFS=','; echo "${WHITELIST_SUBNETS[*]}")
+ local default_whitelist_ips_csv
+ local default_whitelist_subnets_csv
+ default_whitelist_ips_csv=$(IFS=','; echo "${WHITELIST_IPS[*]}")
+ default_whitelist_subnets_csv=$(IFS=','; echo "${WHITELIST_SUBNETS[*]}")
 
-	local cfg_telegram_bot_token="${TELEGRAM_BOT_TOKEN}"
-	local cfg_telegram_chat_id="${TELEGRAM_CHAT_ID}"
-	local cfg_backup_webhook_url="${BACKUP_WEBHOOK_URL}"
-	local cfg_log_file="${LOG_FILE}"
-	local cfg_last_heartbeat_file="${LAST_HEARTBEAT_FILE}"
-	local cfg_last_report_file="${LAST_REPORT_FILE}"
-	local cfg_daily_report_hour="${DAILY_REPORT_HOUR}"
-	local cfg_daily_report_top_ips="${DAILY_REPORT_TOP_IPS}"
-	local cfg_daily_report_tz="${DAILY_REPORT_TZ}"
-	local cfg_last_ssh_check_file="${LAST_SSH_CHECK_FILE}"
-	local cfg_last_sudo_check_file="${LAST_SUDO_CHECK_FILE}"
-	local cfg_last_security_events_file="${LAST_SECURITY_EVENTS_FILE}"
-	local cfg_prometheus_textfile_dir="${PROMETHEUS_TEXTFILE_DIR}"
-	local cfg_healthcheck_status_file="${HEALTHCHECK_STATUS_FILE}"
-	local cfg_brute_window_sec="${BRUTE_WINDOW_SEC}"
-	local cfg_brute_min_fails="${BRUTE_MIN_FAILS}"
-	local cfg_brute_notify_cooldown_sec="${BRUTE_NOTIFY_COOLDOWN_SEC}"
-	local cfg_ban_time="${BAN_TIME}"
-	local cfg_max_attempts="${MAX_ATTEMPTS}"
-	local cfg_ban_check_interval="${BAN_CHECK_INTERVAL}"
-	local cfg_monitor_interval="${MONITOR_INTERVAL}"
-	local cfg_ban_list_file="${BAN_LIST_FILE}"
-	local cfg_whitelist_ips_csv="${default_whitelist_ips_csv}"
-	local cfg_whitelist_subnets_csv="${default_whitelist_subnets_csv}"
+ local cfg_telegram_bot_token="${TELEGRAM_BOT_TOKEN}"
+ local cfg_telegram_chat_id="${TELEGRAM_CHAT_ID}"
+ local cfg_backup_webhook_url="${BACKUP_WEBHOOK_URL}"
+ local cfg_log_file="${LOG_FILE}"
+ local cfg_last_heartbeat_file="${LAST_HEARTBEAT_FILE}"
+ local cfg_last_report_file="${LAST_REPORT_FILE}"
+ local cfg_daily_report_hour="${DAILY_REPORT_HOUR}"
+ local cfg_daily_report_top_ips="${DAILY_REPORT_TOP_IPS}"
+ local cfg_daily_report_tz="${DAILY_REPORT_TZ}"
+ local cfg_last_ssh_check_file="${LAST_SSH_CHECK_FILE}"
+ local cfg_last_sudo_check_file="${LAST_SUDO_CHECK_FILE}"
+ local cfg_last_security_events_file="${LAST_SECURITY_EVENTS_FILE}"
+ local cfg_last_logind_check_file="${LAST_LOGIND_CHECK_FILE}"
+ local cfg_enable_logind_monitor="${ENABLE_LOGIND_MONITOR}"
+ local cfg_logind_notify_new="${LOGIND_NOTIFY_NEW}"
+ local cfg_logind_notify_removed="${LOGIND_NOTIFY_REMOVED}"
+ local cfg_logind_notify_failed="${LOGIND_NOTIFY_FAILED}"
+ local cfg_logind_skip_remote="${LOGIND_SKIP_REMOTE}"
+ local cfg_prometheus_textfile_dir="${PROMETHEUS_TEXTFILE_DIR}"
+ local cfg_healthcheck_status_file="${HEALTHCHECK_STATUS_FILE}"
+ local cfg_brute_window_sec="${BRUTE_WINDOW_SEC}"
+ local cfg_brute_min_fails="${BRUTE_MIN_FAILS}"
+ local cfg_brute_notify_cooldown_sec="${BRUTE_NOTIFY_COOLDOWN_SEC}"
+ local cfg_ban_time="${BAN_TIME}"
+ local cfg_max_attempts="${MAX_ATTEMPTS}"
+ local cfg_ban_check_interval="${BAN_CHECK_INTERVAL}"
+ local cfg_monitor_interval="${MONITOR_INTERVAL}"
+ local cfg_ban_list_file="${BAN_LIST_FILE}"
+ local cfg_whitelist_ips_csv="${default_whitelist_ips_csv}"
+ local cfg_whitelist_subnets_csv="${default_whitelist_subnets_csv}"
 
-	if [ -f "$CONFIG_FILE" ]; then
-		# shellcheck disable=SC1090
-		source "$CONFIG_FILE"
-	else
-		printf 'WARN: Конфиг %s не найден, использую значения по умолчанию\n' "$CONFIG_FILE" >&2
-	fi
+ if [ -f "$CONFIG_FILE" ]; then
+ # shellcheck disable=SC1090
+ source "$CONFIG_FILE"
+ else
+ printf 'WARN: Конфиг %s не найден, использую значения по умолчанию\n' "$CONFIG_FILE" >&2
+ fi
 
-	TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-$cfg_telegram_bot_token}"
-	TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-$cfg_telegram_chat_id}"
-	BACKUP_WEBHOOK_URL="${BACKUP_WEBHOOK_URL:-$cfg_backup_webhook_url}"
-	LOG_FILE="${LOG_FILE:-$cfg_log_file}"
-	LAST_HEARTBEAT_FILE="${LAST_HEARTBEAT_FILE:-$cfg_last_heartbeat_file}"
-	LAST_REPORT_FILE="${LAST_REPORT_FILE:-$cfg_last_report_file}"
-	LAST_SSH_CHECK_FILE="${LAST_SSH_CHECK_FILE:-$cfg_last_ssh_check_file}"
-	LAST_SUDO_CHECK_FILE="${LAST_SUDO_CHECK_FILE:-$cfg_last_sudo_check_file}"
-	LAST_SECURITY_EVENTS_FILE="${LAST_SECURITY_EVENTS_FILE:-$cfg_last_security_events_file}"
-	PROMETHEUS_TEXTFILE_DIR="${PROMETHEUS_TEXTFILE_DIR:-$cfg_prometheus_textfile_dir}"
-	HEALTHCHECK_STATUS_FILE="${HEALTHCHECK_STATUS_FILE:-$cfg_healthcheck_status_file}"
-	BAN_LIST_FILE="${BAN_LIST_FILE:-$cfg_ban_list_file}"
+ TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-$cfg_telegram_bot_token}"
+ TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-$cfg_telegram_chat_id}"
+ BACKUP_WEBHOOK_URL="${BACKUP_WEBHOOK_URL:-$cfg_backup_webhook_url}"
+ LOG_FILE="${LOG_FILE:-$cfg_log_file}"
+ LAST_HEARTBEAT_FILE="${LAST_HEARTBEAT_FILE:-$cfg_last_heartbeat_file}"
+ LAST_REPORT_FILE="${LAST_REPORT_FILE:-$cfg_last_report_file}"
+ LAST_SSH_CHECK_FILE="${LAST_SSH_CHECK_FILE:-$cfg_last_ssh_check_file}"
+ LAST_SUDO_CHECK_FILE="${LAST_SUDO_CHECK_FILE:-$cfg_last_sudo_check_file}"
+ LAST_SECURITY_EVENTS_FILE="${LAST_SECURITY_EVENTS_FILE:-$cfg_last_security_events_file}"
+ LAST_LOGIND_CHECK_FILE="${LAST_LOGIND_CHECK_FILE:-$cfg_last_logind_check_file}"
+ ENABLE_LOGIND_MONITOR="${ENABLE_LOGIND_MONITOR:-$cfg_enable_logind_monitor}"
+ LOGIND_NOTIFY_NEW="${LOGIND_NOTIFY_NEW:-$cfg_logind_notify_new}"
+ LOGIND_NOTIFY_REMOVED="${LOGIND_NOTIFY_REMOVED:-$cfg_logind_notify_removed}"
+ LOGIND_NOTIFY_FAILED="${LOGIND_NOTIFY_FAILED:-$cfg_logind_notify_failed}"
+ LOGIND_SKIP_REMOTE="${LOGIND_SKIP_REMOTE:-$cfg_logind_skip_remote}"
+ PROMETHEUS_TEXTFILE_DIR="${PROMETHEUS_TEXTFILE_DIR:-$cfg_prometheus_textfile_dir}"
+ HEALTHCHECK_STATUS_FILE="${HEALTHCHECK_STATUS_FILE:-$cfg_healthcheck_status_file}"
+ BAN_LIST_FILE="${BAN_LIST_FILE:-$cfg_ban_list_file}"
 
-	DAILY_REPORT_HOUR="${DAILY_REPORT_HOUR:-$cfg_daily_report_hour}"
-	DAILY_REPORT_TOP_IPS="${DAILY_REPORT_TOP_IPS:-$cfg_daily_report_top_ips}"
-	DAILY_REPORT_TZ="$(trim_value "${DAILY_REPORT_TZ:-$cfg_daily_report_tz}")"
-	BRUTE_WINDOW_SEC="${BRUTE_WINDOW_SEC:-$cfg_brute_window_sec}"
-	BRUTE_MIN_FAILS="${BRUTE_MIN_FAILS:-$cfg_brute_min_fails}"
-	BRUTE_NOTIFY_COOLDOWN_SEC="${BRUTE_NOTIFY_COOLDOWN_SEC:-$cfg_brute_notify_cooldown_sec}"
-	BAN_TIME="${BAN_TIME:-$cfg_ban_time}"
-	MAX_ATTEMPTS="${MAX_ATTEMPTS:-$cfg_max_attempts}"
-	BAN_CHECK_INTERVAL="${BAN_CHECK_INTERVAL:-$cfg_ban_check_interval}"
-	MONITOR_INTERVAL="${MONITOR_INTERVAL:-$cfg_monitor_interval}"
+ DAILY_REPORT_HOUR="${DAILY_REPORT_HOUR:-$cfg_daily_report_hour}"
+ DAILY_REPORT_TOP_IPS="${DAILY_REPORT_TOP_IPS:-$cfg_daily_report_top_ips}"
+ DAILY_REPORT_TZ="$(trim_value "${DAILY_REPORT_TZ:-$cfg_daily_report_tz}")"
+ BRUTE_WINDOW_SEC="${BRUTE_WINDOW_SEC:-$cfg_brute_window_sec}"
+ BRUTE_MIN_FAILS="${BRUTE_MIN_FAILS:-$cfg_brute_min_fails}"
+ BRUTE_NOTIFY_COOLDOWN_SEC="${BRUTE_NOTIFY_COOLDOWN_SEC:-$cfg_brute_notify_cooldown_sec}"
+ BAN_TIME="${BAN_TIME:-$cfg_ban_time}"
+ MAX_ATTEMPTS="${MAX_ATTEMPTS:-$cfg_max_attempts}"
+ BAN_CHECK_INTERVAL="${BAN_CHECK_INTERVAL:-$cfg_ban_check_interval}"
+ MONITOR_INTERVAL="${MONITOR_INTERVAL:-$cfg_monitor_interval}"
 
-	local whitelist_ips_csv="${WHITELIST_IPS:-$cfg_whitelist_ips_csv}"
-	local whitelist_subnets_csv="${WHITELIST_SUBNETS:-$cfg_whitelist_subnets_csv}"
-	csv_to_array "$whitelist_ips_csv" WHITELIST_IPS
-	csv_to_array "$whitelist_subnets_csv" WHITELIST_SUBNETS
+ local whitelist_ips_csv="${WHITELIST_IPS:-$cfg_whitelist_ips_csv}"
+ local whitelist_subnets_csv="${WHITELIST_SUBNETS:-$cfg_whitelist_subnets_csv}"
+ csv_to_array "$whitelist_ips_csv" WHITELIST_IPS
+ csv_to_array "$whitelist_subnets_csv" WHITELIST_SUBNETS
 }
 
 # Дата/время для ежедневного отчёта (час DAILY_REPORT_HOUR и «сегодня» в LAST_REPORT_FILE).
 report_date() {
-	if [ -n "${DAILY_REPORT_TZ:-}" ]; then
-		TZ="$DAILY_REPORT_TZ" date "$@"
-	else
-		date "$@"
-	fi
+ if [ -n "${DAILY_REPORT_TZ:-}" ]; then
+ TZ="$DAILY_REPORT_TZ" date "$@"
+ else
+ date "$@"
+ fi
 }
 
 validate_config() {
-	validate_report_hour
-	validate_numeric_or_default "BAN_TIME" "3600"
-	validate_numeric_or_default "MAX_ATTEMPTS" "3"
-	validate_numeric_or_default "BAN_CHECK_INTERVAL" "60"
-	validate_numeric_or_default "MONITOR_INTERVAL" "10"
-	validate_numeric_or_default "DAILY_REPORT_TOP_IPS" "5"
-	validate_numeric_or_default "BRUTE_WINDOW_SEC" "900"
-	validate_numeric_or_default "BRUTE_MIN_FAILS" "30"
-	validate_numeric_or_default "BRUTE_NOTIFY_COOLDOWN_SEC" "3600"
+ validate_report_hour
+ validate_numeric_or_default "BAN_TIME" "3600"
+ validate_numeric_or_default "MAX_ATTEMPTS" "3"
+ validate_numeric_or_default "BAN_CHECK_INTERVAL" "60"
+ validate_numeric_or_default "MONITOR_INTERVAL" "10"
+ validate_numeric_or_default "DAILY_REPORT_TOP_IPS" "5"
+ validate_numeric_or_default "BRUTE_WINDOW_SEC" "900"
+ validate_numeric_or_default "BRUTE_MIN_FAILS" "30"
+ validate_numeric_or_default "BRUTE_NOTIFY_COOLDOWN_SEC" "3600"
 }
 
 # ============================================
@@ -201,99 +222,96 @@ validate_config() {
 # ============================================
 
 stats_auth_log_24h_json() {
-	if command -v python3 >/dev/null 2>&1; then
-		python3 - "$@" <<'PY'
+ if command -v python3 >/dev/null 2>&1; then
+ python3 - "$@" <<'PY'
 import datetime, gzip, json, re, sys, collections
 from pathlib import Path
 
 try:
-	top_n = int(sys.argv[1])
+ top_n = int(sys.argv[1])
 except Exception:
-	top_n = 5
+ top_n = 5
 
 NOW = datetime.datetime.now()
 CUTOFF = NOW - datetime.timedelta(hours=24)
 MONTHS = {
-	"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-	"Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+ "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+ "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
 }
 
 paths = []
 for p in (Path("/var/log/auth.log"), Path("/var/log/auth.log.1")):
-	if p.is_file():
-		paths.append(p)
+ if p.is_file():
+ paths.append(p)
 try:
-	for p in sorted(Path("/var/log").glob("auth.log.*.gz")):
-		paths.append(p)
+ for p in sorted(Path("/var/log").glob("auth.log.*.gz")):
+ paths.append(p)
 except Exception:
-	pass
+ pass
 
 accepted = failed = sudo_cmd = 0
 failed_by_ip = collections.Counter()
 
 line_re = re.compile(
-	r"^(?P<mon>[A-Za-z]{3})\s+(?P<day>\d{1,2})\s+(?P<hms>\d{2}:\d{2}:\d{2})\s+"
-	r"(?P<rest>.+)$"
+ r"^(?P [A-Za-z]{3})\s+(?P \d{1,2})\s+(?P \d{2}:\d{2}:\d{2})\s+"
+ r"(?P.+)$"
 )
 
-
 def open_any(path):
-	if str(path).endswith(".gz"):
-		return gzip.open(path, "rt", errors="ignore")
-	return path.open("r", errors="ignore")
-
+ if str(path).endswith(".gz"):
+ return gzip.open(path, "rt", errors="ignore")
+ return path.open("r", errors="ignore")
 
 def parse_ts(mon: str, day: int, hms: str):
-	m = MONTHS.get(mon)
-	if not m:
-		return None
-	try:
-		h, mi, s = [int(x) for x in hms.split(":")]
-	except Exception:
-		return None
-	year = NOW.year
-	dt = datetime.datetime(year, m, int(day), h, mi, s)
-	if dt > NOW + datetime.timedelta(days=2):
-		dt = dt.replace(year=year - 1)
-	if dt < NOW - datetime.timedelta(days=400):
-		dt = dt.replace(year=year + 1)
-	return dt
-
+ m = MONTHS.get(mon)
+ if not m:
+ return None
+ try:
+ h, mi, s = [int(x) for x in hms.split(":")]
+ except Exception:
+ return None
+ year = NOW.year
+ dt = datetime.datetime(year, m, int(day), h, mi, s)
+ if dt > NOW + datetime.timedelta(days=2):
+ dt = dt.replace(year=year - 1)
+ if dt < NOW - datetime.timedelta(days=400):
+ dt = dt.replace(year=year + 1)
+ return dt
 
 ip_from_failed = re.compile(r" from ([^ ]+) port ")
 ip_from_accepted = re.compile(r" from ([^ ]+) port ")
 
 for path in paths:
-	try:
-		with open_any(path) as fh:
-			for raw in fh:
-				m = line_re.match(raw)
-				if not m:
-					continue
-				dt = parse_ts(m.group("mon"), int(m.group("day")), m.group("hms"))
-				if not dt or dt < CUTOFF:
-					continue
-				rest = m.group("rest")
-				if "sshd" in rest and "Accepted" in rest:
-					accepted += 1
-				if "sshd" in rest and "Failed password" in rest:
-					failed += 1
-					im = ip_from_failed.search(rest)
-					if im:
-						failed_by_ip[im.group(1)] += 1
-				if "sudo" in rest and "COMMAND" in rest:
-					sudo_cmd += 1
-	except FileNotFoundError:
-		continue
-	except Exception:
-		continue
+ try:
+ with open_any(path) as fh:
+ for raw in fh:
+ m = line_re.match(raw)
+ if not m:
+ continue
+ dt = parse_ts(m.group("mon"), int(m.group("day")), m.group("hms"))
+ if not dt or dt < CUTOFF:
+ continue
+ rest = m.group("rest")
+ if "sshd" in rest and "Accepted" in rest:
+ accepted += 1
+ if "sshd" in rest and "Failed password" in rest:
+ failed += 1
+ im = ip_from_failed.search(rest)
+ if im:
+ failed_by_ip[im.group(1)] += 1
+ if "sudo" in rest and "COMMAND" in rest:
+ sudo_cmd += 1
+ except FileNotFoundError:
+ continue
+ except Exception:
+ continue
 
 top = [f"{ip}:{cnt}" for ip, cnt in failed_by_ip.most_common(top_n)]
 print(json.dumps({"accepted": accepted, "failed": failed, "sudo": sudo_cmd, "top": top}))
 PY
-	else
-		echo '{"accepted":0,"failed":0,"sudo":0,"top":[]}'
-	fi
+ else
+ echo '{"accepted":0,"failed":0,"sudo":0,"top":[]}'
+ fi
 }
 
 # ============================================
@@ -301,19 +319,19 @@ PY
 # ============================================
 
 write_log() {
-	local message="$1"
-	local timestamp
-	timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-	if [ "${CHECK_CONFIG_ONLY:-0}" = "1" ]; then
-		printf '%s - %s\n' "$timestamp" "$message"
-		return 0
-	fi
-	if [ "${DRY_RUN:-0}" = "1" ] && [ ! -w "$(dirname "$LOG_FILE")" ] 2>/dev/null; then
-		printf '%s - %s\n' "$timestamp" "$message"
-		return 0
-	fi
-	echo "${timestamp} - ${message}" >>"$LOG_FILE"
-	echo "${timestamp} - ${message}"
+ local message="$1"
+ local timestamp
+ timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+ if [ "${CHECK_CONFIG_ONLY:-0}" = "1" ]; then
+ printf '%s - %s\n' "$timestamp" "$message"
+ return 0
+ fi
+ if [ "${DRY_RUN:-0}" = "1" ] && [ ! -w "$(dirname "$LOG_FILE")" ] 2>/dev/null; then
+ printf '%s - %s\n' "$timestamp" "$message"
+ return 0
+ fi
+ echo "${timestamp} - ${message}" >>"$LOG_FILE"
+ echo "${timestamp} - ${message}"
 }
 
 # ============================================
@@ -321,63 +339,63 @@ write_log() {
 # ============================================
 
 send_telegram_raw() {
-	local message="$1"
-	if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-		return 1
-	fi
-	local url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
-	local body
-	if ! body=$(curl -fsS -X POST "$url" \
-		--data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-		--data-urlencode "text=${message}" \
-		--data-urlencode "parse_mode=HTML" \
-		--max-time 10 2>/dev/null); then
-		return 1
-	fi
-	if echo "$body" | grep -q '"ok":true'; then
-		return 0
-	fi
-	return 1
+ local message="$1"
+ if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+ return 1
+ fi
+ local url="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+ local body
+ if ! body=$(curl -fsS -X POST "$url" \
+ --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+ --data-urlencode "text=${message}" \
+ --data-urlencode "parse_mode=HTML" \
+ --max-time 10 2>/dev/null); then
+ return 1
+ fi
+ if echo "$body" | grep -q '"ok":true'; then
+ return 0
+ fi
+ return 1
 }
 
 send_backup_webhook_raw() {
-	local message="$1"
-	if [ -z "${BACKUP_WEBHOOK_URL:-}" ]; then
-		return 1
-	fi
-	if ! command -v python3 >/dev/null 2>&1; then
-		return 1
-	fi
-	local plain="$message"
-	local payload
-	payload="$(BACKUP_MSG="$plain" python3 - <<'PY'
+ local message="$1"
+ if [ -z "${BACKUP_WEBHOOK_URL:-}" ]; then
+ return 1
+ fi
+ if ! command -v python3 >/dev/null 2>&1; then
+ return 1
+ fi
+ local plain="$message"
+ local payload
+ payload="$(BACKUP_MSG="$plain" python3 - <<'PY'
 import json, os
 print(json.dumps({"text": os.environ.get("BACKUP_MSG", "")}))
 PY
 )"
-	if curl -fsS -m 12 -X POST "$BACKUP_WEBHOOK_URL" \
-		-H "Content-Type: application/json" \
-		-d "$payload" >/dev/null 2>&1; then
-		return 0
-	fi
-	return 1
+ if curl -fsS -m 12 -X POST "$BACKUP_WEBHOOK_URL" \
+ -H "Content-Type: application/json" \
+ -d "$payload" >/dev/null 2>&1; then
+ return 0
+ fi
+ return 1
 }
 
 notify_send() {
-	local message="$1"
-	if [ "${DRY_RUN:-0}" = "1" ]; then
-		printf '[DRY-RUN notify] %s\n' "$(printf '%s' "$message" | tr '\n' ' ')" >&2
-		return 0
-	fi
-	if send_telegram_raw "$message"; then
-		return 0
-	fi
-	if send_backup_webhook_raw "$message"; then
-		write_log "WARN: Telegram недоступен, сообщение ушло в BACKUP_WEBHOOK_URL"
-		return 0
-	fi
-	write_log "WARN: не удалось отправить уведомление (Telegram и резервный канал)"
-	return 1
+ local message="$1"
+ if [ "${DRY_RUN:-0}" = "1" ]; then
+ printf '[DRY-RUN notify] %s\n' "$(printf '%s' "$message" | tr '\n' ' ')" >&2
+ return 0
+ fi
+ if send_telegram_raw "$message"; then
+ return 0
+ fi
+ if send_backup_webhook_raw "$message"; then
+ write_log "WARN: Telegram недоступен, сообщение ушло в BACKUP_WEBHOOK_URL"
+ return 0
+ fi
+ write_log "WARN: не удалось отправить уведомление (Telegram и резервный канал)"
+ return 1
 }
 
 # ============================================
@@ -385,52 +403,52 @@ notify_send() {
 # ============================================
 
 ip_to_num() {
-	local ip="$1"
-	local a b c d
-	IFS=. read -r a b c d <<<"$ip"
-	echo "$((a * 256 ** 3 + b * 256 ** 2 + c * 256 + d))"
+ local ip="$1"
+ local a b c d
+ IFS=. read -r a b c d <<<"$ip"
+ echo "$((a * 256 ** 3 + b * 256 ** 2 + c * 256 + d))"
 }
 
 ip_in_subnet() {
-	local ip="$1"
-	local subnet="$2"
+ local ip="$1"
+ local subnet="$2"
 
-	[[ "$ip" == *:* ]] && return 1
+ [[ "$ip" == *:* ]] && return 1
 
-	local network="${subnet%/*}"
-	local mask="${subnet#*/}"
+ local network="${subnet%/*}"
+ local mask="${subnet#*/}"
 
-	local ip_num
-	local network_num
-	ip_num=$(ip_to_num "$ip")
-	network_num=$(ip_to_num "$network")
+ local ip_num
+ local network_num
+ ip_num=$(ip_to_num "$ip")
+ network_num=$(ip_to_num "$network")
 
-	local mask_num=$((0xffffffff << (32 - mask) & 0xffffffff))
+ local mask_num=$((0xffffffff << (32 - mask) & 0xffffffff))
 
-	if [ $((ip_num & mask_num)) -eq $((network_num & mask_num)) ]; then
-		return 0
-	fi
-	return 1
+ if [ $((ip_num & mask_num)) -eq $((network_num & mask_num)) ]; then
+ return 0
+ fi
+ return 1
 }
 
 is_whitelisted() {
-	local ip="$1"
+ local ip="$1"
 
-	for whitelist_ip in "${WHITELIST_IPS[@]}"; do
-		if [ "$ip" = "$whitelist_ip" ]; then
-			return 0
-		fi
-	done
+ for whitelist_ip in "${WHITELIST_IPS[@]}"; do
+ if [ "$ip" = "$whitelist_ip" ]; then
+ return 0
+ fi
+ done
 
-	[[ "$ip" == *:* ]] && return 1
+ [[ "$ip" == *:* ]] && return 1
 
-	for subnet in "${WHITELIST_SUBNETS[@]}"; do
-		if ip_in_subnet "$ip" "$subnet"; then
-			return 0
-		fi
-	done
+ for subnet in "${WHITELIST_SUBNETS[@]}"; do
+ if ip_in_subnet "$ip" "$subnet"; then
+ return 0
+ fi
+ done
 
-	return 1
+ return 1
 }
 
 # ============================================
@@ -438,209 +456,209 @@ is_whitelisted() {
 # ============================================
 
 is_ipv6() {
-	[[ "$1" == *:* ]]
+ [[ "$1" == *:* ]]
 }
 
 do_firewall_add_drop() {
-	local ip="$1"
-	if is_ipv6 "$ip"; then
-		if command -v ip6tables >/dev/null 2>&1; then
-			sudo ip6tables -I INPUT -s "$ip" -j DROP
-		else
-			write_log "WARN: IPv6 $ip — ip6tables недоступен, блокировка пропущена"
-			return 1
-		fi
-	else
-		do_iptables -I INPUT -s "$ip" -j DROP
-	fi
+ local ip="$1"
+ if is_ipv6 "$ip"; then
+ if command -v ip6tables >/dev/null 2>&1; then
+ sudo ip6tables -I INPUT -s "$ip" -j DROP
+ else
+ write_log "WARN: IPv6 $ip — ip6tables недоступен, блокировка пропущена"
+ return 1
+ fi
+ else
+ do_iptables -I INPUT -s "$ip" -j DROP
+ fi
 }
 
 do_firewall_del_drop() {
-	local ip="$1"
-	if is_ipv6 "$ip"; then
-		if command -v ip6tables >/dev/null 2>&1; then
-			sudo ip6tables -D INPUT -s "$ip" -j DROP
-		fi
-	else
-		do_iptables -D INPUT -s "$ip" -j DROP
-	fi
+ local ip="$1"
+ if is_ipv6 "$ip"; then
+ if command -v ip6tables >/dev/null 2>&1; then
+ sudo ip6tables -D INPUT -s "$ip" -j DROP
+ fi
+ else
+ do_iptables -D INPUT -s "$ip" -j DROP
+ fi
 }
 
 is_firewall_blocked() {
-	local ip="$1"
-	if is_ipv6 "$ip"; then
-		if command -v ip6tables >/dev/null 2>&1; then
-			sudo ip6tables -C INPUT -s "$ip" -j DROP >/dev/null 2>&1
-		else
-			return 1
-		fi
-	else
-		do_iptables -C INPUT -s "$ip" -j DROP >/dev/null 2>&1
-	fi
+ local ip="$1"
+ if is_ipv6 "$ip"; then
+ if command -v ip6tables >/dev/null 2>&1; then
+ sudo ip6tables -C INPUT -s "$ip" -j DROP >/dev/null 2>&1
+ else
+ return 1
+ fi
+ else
+ do_iptables -C INPUT -s "$ip" -j DROP >/dev/null 2>&1
+ fi
 }
 
 do_iptables() {
-	if [ "${DRY_RUN:-0}" = "1" ]; then
-		write_log "DRY-RUN: iptables $*"
-		return 0
-	fi
-	sudo iptables "$@"
+ if [ "${DRY_RUN:-0}" = "1" ]; then
+ write_log "DRY-RUN: iptables $*"
+ return 0
+ fi
+ sudo iptables "$@"
 }
 
 save_iptables_rules() {
-	if [ "${DRY_RUN:-0}" = "1" ]; then
-		return 0
-	fi
-	if command -v iptables-save >/dev/null 2>&1; then
-		if [ -d /etc/iptables ]; then
-			sudo iptables-save >/etc/iptables/rules.v4 2>/dev/null || true
-		fi
-	fi
-	if command -v ip6tables-save >/dev/null 2>&1; then
-		if [ -d /etc/iptables ]; then
-			sudo ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || true
-		fi
-	fi
+ if [ "${DRY_RUN:-0}" = "1" ]; then
+ return 0
+ fi
+ if command -v iptables-save >/dev/null 2>&1; then
+ if [ -d /etc/iptables ]; then
+ sudo iptables-save >/etc/iptables/rules.v4 2>/dev/null || true
+ fi
+ fi
+ if command -v ip6tables-save >/dev/null 2>&1; then
+ if [ -d /etc/iptables ]; then
+ sudo ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || true
+ fi
+ fi
 }
 
 is_ip_blocked() {
-	local ip="$1"
-	if [ "${DRY_RUN:-0}" = "1" ]; then
-		return 1
-	fi
-	is_firewall_blocked "$ip"
+ local ip="$1"
+ if [ "${DRY_RUN:-0}" = "1" ]; then
+ return 1
+ fi
+ is_firewall_blocked "$ip"
 }
 
 block_ip() {
-	local ip="$1"
-	local attempts="$2"
+ local ip="$1"
+ local attempts="$2"
 
-	if is_whitelisted "$ip"; then
-		write_log "Попытка блокировки whitelist IP $ip - игнорируем"
-		return 0
-	fi
+ if is_whitelisted "$ip"; then
+ write_log "Попытка блокировки whitelist IP $ip - игнорируем"
+ return 0
+ fi
 
-	if is_ip_blocked "$ip"; then
-		return 0
-	fi
+ if is_ip_blocked "$ip"; then
+ return 0
+ fi
 
-	local ban_until=$(($(date '+%s') + BAN_TIME))
+ local ban_until=$(($(date '+%s') + BAN_TIME))
 
-	do_firewall_add_drop "$ip" || true
+ do_firewall_add_drop "$ip" || true
 
-	echo "$ip|$ban_until|$attempts|$(date '+%Y-%m-%d %H:%M:%S')" >>"$BAN_LIST_FILE"
+ echo "$ip|$ban_until|$attempts|$(date '+%Y-%m-%d %H:%M:%S')" >>"$BAN_LIST_FILE"
 
-	save_iptables_rules
+ save_iptables_rules
 
-	local ban_time_hours=$((BAN_TIME / 3600))
-	local message=" 🚫 IP ЗАБЛОКИРОВАН АВТОМАТИЧЕСКИ "$'\n'
-	message="${message}🌐 IP: ${ip}"$'\n'
-	message="${message}📊 Неудачных попыток: ${attempts}"$'\n'
-	message="${message}⏱️ Блокировка на: ${ban_time_hours} час(ов)"$'\n'
-	message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
-	notify_send "$message"
-	write_log "AUTO-BAN: IP $ip заблокирован на $ban_time_hours часов ($attempts попыток)"
+ local ban_time_hours=$((BAN_TIME / 3600))
+ local message=" 🚫 IP ЗАБЛОКИРОВАН АВТОМАТИЧЕСКИ "$'\n'
+ message="${message}🌐 IP: ${ip}"$'\n'
+ message="${message}📊 Неудачных попыток: ${attempts}"$'\n'
+ message="${message}⏱️ Блокировка на: ${ban_time_hours} час(ов)"$'\n'
+ message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$message"
+ write_log "AUTO-BAN: IP $ip заблокирован на $ban_time_hours часов ($attempts попыток)"
 }
 
 unblock_expired_ips() {
-	local temp_file
-	temp_file=$(mktemp)
-	local current_time
-	current_time=$(date '+%s')
-	local unblocked=0
+ local temp_file
+ temp_file=$(mktemp)
+ local current_time
+ current_time=$(date '+%s')
+ local unblocked=0
 
-	if [ ! -f "$BAN_LIST_FILE" ]; then
-		return
-	fi
+ if [ ! -f "$BAN_LIST_FILE" ]; then
+ return
+ fi
 
-	while IFS='|' read -r ip ban_until attempts ban_time; do
-		if [ -n "$ip" ] && [ -n "$ban_until" ]; then
-			if [ "$current_time" -ge "$ban_until" ]; then
-				if is_ip_blocked "$ip"; then
-					do_firewall_del_drop "$ip"
-					write_log "UNBAN: IP $ip разблокирован (время блокировки истекло)"
+ while IFS='|' read -r ip ban_until attempts ban_time; do
+ if [ -n "$ip" ] && [ -n "$ban_until" ]; then
+ if [ "$current_time" -ge "$ban_until" ]; then
+ if is_ip_blocked "$ip"; then
+ do_firewall_del_drop "$ip"
+ write_log "UNBAN: IP $ip разблокирован (время блокировки истекло)"
 
-					local message=" 🔓 IP РАЗБЛОКИРОВАН "$'\n'
-					message="${message}🌐 IP: ${ip}"$'\n'
-					message="${message}🕐 Время разблокировки: $(date '+%d.%m.%Y %H:%M:%S')"
-					notify_send "$message"
+ local message=" 🔓 IP РАЗБЛОКИРОВАН "$'\n'
+ message="${message}🌐 IP: ${ip}"$'\n'
+ message="${message}🕐 Время разблокировки: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$message"
 
-					unblocked=$((unblocked + 1))
-				fi
-			else
-				echo "$ip|$ban_until|$attempts|$ban_time" >>"$temp_file"
-			fi
-		fi
-	done <"$BAN_LIST_FILE"
+ unblocked=$((unblocked + 1))
+ fi
+ else
+ echo "$ip|$ban_until|$attempts|$ban_time" >>"$temp_file"
+ fi
+ fi
+ done <"$BAN_LIST_FILE"
 
-	if [ $unblocked -gt 0 ]; then
-		mv "$temp_file" "$BAN_LIST_FILE"
-		save_iptables_rules
-		write_log "Разблокировано $unblocked IP адресов"
-	else
-		rm -f "$temp_file"
-	fi
+ if [ $unblocked -gt 0 ]; then
+ mv "$temp_file" "$BAN_LIST_FILE"
+ save_iptables_rules
+ write_log "Разблокировано $unblocked IP адресов"
+ else
+ rm -f "$temp_file"
+ fi
 }
 
 load_existing_bans() {
-	if [ ! -f "$BAN_LIST_FILE" ]; then
-		return
-	fi
+ if [ ! -f "$BAN_LIST_FILE" ]; then
+ return
+ fi
 
-	local current_time
-	current_time=$(date '+%s')
-	local temp_file
-	temp_file=$(mktemp)
+ local current_time
+ current_time=$(date '+%s')
+ local temp_file
+ temp_file=$(mktemp)
 
-	while IFS='|' read -r ip ban_until attempts ban_time; do
-		if [ -n "$ip" ] && [ -n "$ban_until" ]; then
-			if [ "$current_time" -lt "$ban_until" ]; then
-				if ! is_ip_blocked "$ip"; then
-					do_firewall_add_drop "$ip" || true
-					write_log "Восстановлена блокировка IP $ip (истекает через $(((ban_until - current_time) / 60)) минут)"
-				fi
-				echo "$ip|$ban_until|$attempts|$ban_time" >>"$temp_file"
-			fi
-		fi
-	done <"$BAN_LIST_FILE"
+ while IFS='|' read -r ip ban_until attempts ban_time; do
+ if [ -n "$ip" ] && [ -n "$ban_until" ]; then
+ if [ "$current_time" -lt "$ban_until" ]; then
+ if ! is_ip_blocked "$ip"; then
+ do_firewall_add_drop "$ip" || true
+ write_log "Восстановлена блокировка IP $ip (истекает через $(((ban_until - current_time) / 60)) минут)"
+ fi
+ echo "$ip|$ban_until|$attempts|$ban_time" >>"$temp_file"
+ fi
+ fi
+ done <"$BAN_LIST_FILE"
 
-	mv "$temp_file" "$BAN_LIST_FILE"
-	save_iptables_rules
+ mv "$temp_file" "$BAN_LIST_FILE"
+ save_iptables_rules
 }
 
 verify_ban_list_vs_firewall() {
-	[ ! -f "$BAN_LIST_FILE" ] && return 0
-	local current_epoch
-	current_epoch=$(date '+%s')
-	while IFS='|' read -r ip ban_until _rest; do
-		[ -z "$ip" ] || [ -z "$ban_until" ] && continue
-		if [ "$current_epoch" -lt "$ban_until" ]; then
-			if ! is_ip_blocked "$ip"; then
-				write_log "AUDIT: рассинхрон — IP $ip есть в бан-листе, но нет правила DROP в firewall"
-			fi
-		fi
-	done <"$BAN_LIST_FILE"
+ [ ! -f "$BAN_LIST_FILE" ] && return 0
+ local current_epoch
+ current_epoch=$(date '+%s')
+ while IFS='|' read -r ip ban_until _rest; do
+ [ -z "$ip" ] || [ -z "$ban_until" ] && continue
+ if [ "$current_epoch" -lt "$ban_until" ]; then
+ if ! is_ip_blocked "$ip"; then
+ write_log "AUDIT: рассинхрон — IP $ip есть в бан-листе, но нет правила DROP в firewall"
+ fi
+ fi
+ done <"$BAN_LIST_FILE"
 }
 
 load_whitelist_from_file() {
-	local whitelist_file="/etc/ssh_monitor_whitelist.txt"
+ local whitelist_file="/etc/ssh_monitor_whitelist.txt"
 
-	if [ -f "$whitelist_file" ]; then
-		write_log "Загрузка белого списка из $whitelist_file"
+ if [ -f "$whitelist_file" ]; then
+ write_log "Загрузка белого списка из $whitelist_file"
 
-		while IFS= read -r line || [ -n "$line" ]; do
-			[[ "$line" =~ ^#.*$ ]] && continue
-			[[ -z "$line" ]] && continue
+ while IFS= read -r line || [ -n "$line" ]; do
+ [[ "$line" =~ ^#.*$ ]] && continue
+ [[ -z "$line" ]] && continue
 
-			if [[ "$line" == *"/"* ]]; then
-				WHITELIST_SUBNETS+=("$line")
-				write_log "Добавлена подсеть в белый список: $line"
-			else
-				WHITELIST_IPS+=("$line")
-				write_log "Добавлен IP в белый список: $line"
-			fi
-		done <"$whitelist_file"
-	fi
+ if [[ "$line" == *"/"* ]]; then
+ WHITELIST_SUBNETS+=("$line")
+ write_log "Добавлена подсеть в белый список: $line"
+ else
+ WHITELIST_IPS+=("$line")
+ write_log "Добавлен IP в белый список: $line"
+ fi
+ done <"$whitelist_file"
+ fi
 }
 
 # ============================================
@@ -648,29 +666,29 @@ load_whitelist_from_file() {
 # ============================================
 
 get_active_ssh_sessions() {
-	local out=""
-	local line user tty login_time ip
-	while IFS= read -r line; do
-		[[ -z "$line" ]] && continue
-		[[ "$line" != *"("* ]] && continue
-		user=$(awk '{print $1}' <<<"$line")
-		tty=$(awk '{print $2}' <<<"$line")
-		login_time=$(awk '{print $3, $4}' <<<"$line")
-		ip=$(sed -nE 's/.*\(([^)]+)\).*/\1/p' <<<"$line")
-		ip="${ip:-local}"
-		out+=" 👤 ${user} | ${tty} | с ${login_time} | 🌐 ${ip}"$'\n'
-	done < <(who 2>/dev/null || true)
-	printf '%s' "$out"
+ local out=""
+ local line user tty login_time ip
+ while IFS= read -r line; do
+ [[ -z "$line" ]] && continue
+ [[ "$line" != *"("* ]] && continue
+ user=$(awk '{print $1}' <<<"$line")
+ tty=$(awk '{print $2}' <<<"$line")
+ login_time=$(awk '{print $3, $4}' <<<"$line")
+ ip=$(sed -nE 's/.*\(([^)]+)\).*/\1/p' <<<"$line")
+ ip="${ip:-local}"
+ out+=" 👤 ${user} | ${tty} | с ${login_time} | 🌐 ${ip}"$'\n'
+ done < <(who 2>/dev/null || true)
+ printf '%s' "$out"
 }
 
 extract_ssh_client_ip() {
-	local line="$1"
-	local ip=""
-	ip=$(sed -nE 's/.* from ([^ ]+) port .*/\1/p' <<<"$line")
-	if [ -z "$ip" ]; then
-		ip=$(sed -nE 's/.* from ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"$line")
-	fi
-	printf '%s' "$ip"
+ local line="$1"
+ local ip=""
+ ip=$(sed -nE 's/.* from ([^ ]+) port .*/\1/p' <<<"$line")
+ if [ -z "$ip" ]; then
+ ip=$(sed -nE 's/.* from ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"$line")
+ fi
+ printf '%s' "$ip"
 }
 
 # ============================================
@@ -678,78 +696,78 @@ extract_ssh_client_ip() {
 # ============================================
 
 monitor_ssh() {
-	local last_check="0"
-	if [ -f "$LAST_SSH_CHECK_FILE" ]; then
-		last_check="$(<"$LAST_SSH_CHECK_FILE")"
-	fi
-	local current_time
-	current_time=$(date '+%s')
+ local last_check="0"
+ if [ -f "$LAST_SSH_CHECK_FILE" ]; then
+ last_check="$(<"$LAST_SSH_CHECK_FILE")"
+ fi
+ local current_time
+ current_time=$(date '+%s')
 
-	local ssh_logs=""
-	if command -v journalctl >/dev/null 2>&1; then
-		ssh_logs=$(journalctl -u ssh -u sshd --since="@${last_check}" --until="now" 2>/dev/null | grep -E "Accepted|Failed|Disconnected" || true)
-	else
-		ssh_logs=$(grep -E "sshd.*(Accepted|Failed|Disconnected)" /var/log/auth.log 2>/dev/null || true)
-	fi
+ local ssh_logs=""
+ if command -v journalctl >/dev/null 2>&1; then
+ ssh_logs=$(journalctl -u ssh -u sshd --since="@${last_check}" --until="now" 2>/dev/null | grep -E "Accepted|Failed|Disconnected" || true)
+ else
+ ssh_logs=$(grep -E "sshd.*(Accepted|Failed|Disconnected)" /var/log/auth.log 2>/dev/null || true)
+ fi
 
-	if [ -n "$ssh_logs" ]; then
-		while IFS= read -r line; do
-			[[ -z "$line" ]] && continue
-			if echo "$line" | grep -q "Accepted"; then
-				local user ip
-				user=$(sed -nE 's/.* for ([^ ]+) from .*/\1/p' <<<"$line")
-				ip="$(extract_ssh_client_ip "$line")"
-				if [ -n "$user" ]; then
-					local message=" ✅ УСПЕШНОЕ SSH ПОДКЛЮЧЕНИЕ "$'\n'
-					message="${message}👤 Пользователь: ${user}"$'\n'
-					message="${message}🌐 IP адрес: ${ip:-local}"$'\n'
-					message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
-					notify_send "$message"
-					write_log "SSH успешный вход: $user с IP ${ip:-local}"
-					if [ "$user" = "root" ]; then
-						local rmsg=" 🔑 SSH ВХОД ПОД ROOT "$'\n'
-						rmsg="${rmsg}🌐 IP: ${ip:-local}"$'\n'
-						rmsg="${rmsg}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
-						notify_send "$rmsg"
-					fi
-				fi
-			elif echo "$line" | grep -q "Failed password"; then
-				local user ip
-				user=$(sed -nE 's/.* for (invalid user )?([^ ]+) from .*/\2/p' <<<"$line")
-				ip="$(extract_ssh_client_ip "$line")"
+ if [ -n "$ssh_logs" ]; then
+ while IFS= read -r line; do
+ [[ -z "$line" ]] && continue
+ if echo "$line" | grep -q "Accepted"; then
+ local user ip
+ user=$(sed -nE 's/.* for ([^ ]+) from .*/\1/p' <<<"$line")
+ ip="$(extract_ssh_client_ip "$line")"
+ if [ -n "$user" ]; then
+ local message=" ✅ УСПЕШНОЕ SSH ПОДКЛЮЧЕНИЕ "$'\n'
+ message="${message}👤 Пользователь: ${user}"$'\n'
+ message="${message}🌐 IP адрес: ${ip:-local}"$'\n'
+ message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$message"
+ write_log "SSH успешный вход: $user с IP ${ip:-local}"
+ if [ "$user" = "root" ]; then
+ local rmsg=" 🔑 SSH ВХОД ПОД ROOT "$'\n'
+ rmsg="${rmsg}🌐 IP: ${ip:-local}"$'\n'
+ rmsg="${rmsg}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$rmsg"
+ fi
+ fi
+ elif echo "$line" | grep -q "Failed password"; then
+ local user ip
+ user=$(sed -nE 's/.* for (invalid user )?([^ ]+) from .*/\2/p' <<<"$line")
+ ip="$(extract_ssh_client_ip "$line")"
 
-				if [ -n "$ip" ]; then
-					local current_attempts=1
-					if [ -n "${FAIL_COUNTS[$ip]:-}" ]; then
-						current_attempts=${FAIL_COUNTS[$ip]}
-						current_attempts=$((current_attempts + 1))
-					fi
-					FAIL_COUNTS[$ip]=$current_attempts
+ if [ -n "$ip" ]; then
+ local current_attempts=1
+ if [ -n "${FAIL_COUNTS[$ip]:-}" ]; then
+ current_attempts=${FAIL_COUNTS[$ip]}
+ current_attempts=$((current_attempts + 1))
+ fi
+ FAIL_COUNTS[$ip]=$current_attempts
 
-					if is_ip_blocked "$ip"; then
-						write_log "Попытка входа с заблокированного IP $ip (пользователь: $user)"
-					else
-						if [ "$current_attempts" -ge "$MAX_ATTEMPTS" ]; then
-							block_ip "$ip" "$current_attempts"
-							unset "FAIL_COUNTS[$ip]"
-						else
-							if [ "$current_attempts" -ge 2 ]; then
-								local message=" ❌ НЕУДАЧНАЯ ПОПЫТКА SSH "$'\n'
-								message="${message}👤 Пользователь: ${user}"$'\n'
-								message="${message}🌐 IP адрес: ${ip}"$'\n'
-								message="${message}📊 Попытка ${current_attempts} из ${MAX_ATTEMPTS}"$'\n'
-								message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
-								notify_send "$message"
-							fi
-							write_log "SSH неудачная попытка: $user с IP $ip (попытка $current_attempts из $MAX_ATTEMPTS)"
-						fi
-					fi
-				fi
-			fi
-		done <<<"$ssh_logs"
-	fi
+ if is_ip_blocked "$ip"; then
+ write_log "Попытка входа с заблокированного IP $ip (пользователь: $user)"
+ else
+ if [ "$current_attempts" -ge "$MAX_ATTEMPTS" ]; then
+ block_ip "$ip" "$current_attempts"
+ unset "FAIL_COUNTS[$ip]"
+ else
+ if [ "$current_attempts" -ge 2 ]; then
+ local message=" ❌ НЕУДАЧНАЯ ПОПЫТКА SSH "$'\n'
+ message="${message}👤 Пользователь: ${user}"$'\n'
+ message="${message}🌐 IP адрес: ${ip}"$'\n'
+ message="${message}📊 Попытка ${current_attempts} из ${MAX_ATTEMPTS}"$'\n'
+ message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$message"
+ fi
+ write_log "SSH неудачная попытка: $user с IP $ip (попытка $current_attempts из $MAX_ATTEMPTS)"
+ fi
+ fi
+ fi
+ fi
+ done <<<"$ssh_logs"
+ fi
 
-	echo "$current_time" >"$LAST_SSH_CHECK_FILE"
+ echo "$current_time" >"$LAST_SSH_CHECK_FILE"
 }
 
 # ============================================
@@ -759,108 +777,108 @@ monitor_ssh() {
 # Строка успешного sudo с перечислением окружения (TTY, PWD, USER, COMMAND).
 # В journal идентификатор часто НЕ равен "sudo", поэтому не используем только journalctl -t sudo.
 is_sudo_command_audit_line() {
-	[[ "$1" == *COMMAND=* ]] || return 1
-	grep -Eq 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' <<<"$1" 2>/dev/null || \
-		grep -Eq 'sudo:[[:space:]].*COMMAND=' <<<"$1" 2>/dev/null
+ [[ "$1" == *COMMAND=* ]] || return 1
+ grep -Eq 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' <<<"$1" 2>/dev/null || \
+ grep -Eq 'sudo:[[:space:]].*COMMAND=' <<<"$1" 2>/dev/null
 }
 
 parse_sudo_audit_line() {
-	local line="$1"
-	local -n out_user="$2"
-	local -n out_cmd="$3"
-	local -n out_pwd="$4"
-	local -n out_runuser="$5"
+ local line="$1"
+ local -n out_user="$2"
+ local -n out_cmd="$3"
+ local -n out_pwd="$4"
+ local -n out_runuser="$5"
 
-	out_user=""
-	out_cmd=""
-	out_pwd=""
-	out_runuser=""
+ out_user=""
+ out_cmd=""
+ out_pwd=""
+ out_runuser=""
 
-	if [[ "$line" =~ sudo\[[0-9]+\]:[[:space:]]([^[:space:]]+)[[:space:]]+:[[:space:]] ]]; then
-		out_user="${BASH_REMATCH[1]}"
-	elif [[ "$line" =~ sudo:[[:space:]]([^[:space:]]+)[[:space:]]+:[[:space:]] ]]; then
-		out_user="${BASH_REMATCH[1]}"
-	fi
+ if [[ "$line" =~ sudo\[[0-9]+\]:[[:space:]]([^[:space:]]+)[[:space:]]+:[[:space:]] ]]; then
+ out_user="${BASH_REMATCH[1]}"
+ elif [[ "$line" =~ sudo:[[:space:]]([^[:space:]]+)[[:space:]]+:[[:space:]] ]]; then
+ out_user="${BASH_REMATCH[1]}"
+ fi
 
-	if [[ "$line" =~ USER=([^[:space:];]+) ]]; then
-		out_runuser="${BASH_REMATCH[1]}"
-	fi
+ if [[ "$line" =~ USER=([^[:space:];]+) ]]; then
+ out_runuser="${BASH_REMATCH[1]}"
+ fi
 
-	if [[ "$line" =~ PWD=([^;]+) ]]; then
-		out_pwd="${BASH_REMATCH[1]}"
-		out_pwd="${out_pwd%"${out_pwd##*[![:space:]]}"}"
-	fi
+ if [[ "$line" =~ PWD=([^;]+) ]]; then
+ out_pwd="${BASH_REMATCH[1]}"
+ out_pwd="${out_pwd%"${out_pwd##*[![:space:]]}"}"
+ fi
 
-	if [[ "$line" =~ COMMAND=(.*) ]]; then
-		out_cmd="${BASH_REMATCH[1]}"
-		out_cmd="${out_cmd%"${out_cmd##*[![:space:]]}"}"
-	fi
+ if [[ "$line" =~ COMMAND=(.*) ]]; then
+ out_cmd="${BASH_REMATCH[1]}"
+ out_cmd="${out_cmd%"${out_cmd##*[![:space:]]}"}"
+ fi
 }
 
 monitor_sudo() {
-	local last_check="0"
-	if [ -f "$LAST_SUDO_CHECK_FILE" ]; then
-		last_check="$(<"$LAST_SUDO_CHECK_FILE")"
-	fi
-	if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
-		last_check=0
-	fi
-	local current_time
-	current_time=$(date '+%s')
+ local last_check="0"
+ if [ -f "$LAST_SUDO_CHECK_FILE" ]; then
+ last_check="$(<"$LAST_SUDO_CHECK_FILE")"
+ fi
+ if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
+ last_check=0
+ fi
+ local current_time
+ current_time=$(date '+%s')
 
-	local since_journal
-	if [ "$last_check" -eq 0 ]; then
-		since_journal="--since=-30m"
-	else
-		since_journal="--since=@${last_check}"
-	fi
+ local since_journal
+ if [ "$last_check" -eq 0 ]; then
+ since_journal="--since=-30m"
+ else
+ since_journal="--since=@${last_check}"
+ fi
 
-	local sudo_logs=""
-	if command -v journalctl >/dev/null 2>&1; then
-		sudo_logs=$(journalctl $since_journal --until="now" --no-pager 2>/dev/null \
-			| grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' || true)
-	elif [ -f /var/log/auth.log ]; then
-		sudo_logs=$(grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' /var/log/auth.log 2>/dev/null | tail -n 400 || true)
-	elif [ -f /var/log/secure ]; then
-		sudo_logs=$(grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' /var/log/secure 2>/dev/null | tail -n 400 || true)
-	else
-		sudo_logs=""
-	fi
+ local sudo_logs=""
+ if command -v journalctl >/dev/null 2>&1; then
+ sudo_logs=$(journalctl $since_journal --until="now" --no-pager 2>/dev/null \
+ | grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' || true)
+ elif [ -f /var/log/auth.log ]; then
+ sudo_logs=$(grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' /var/log/auth.log 2>/dev/null | tail -n 400 || true)
+ elif [ -f /var/log/secure ]; then
+ sudo_logs=$(grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' /var/log/secure 2>/dev/null | tail -n 400 || true)
+ else
+ sudo_logs=""
+ fi
 
-	declare -A SUDO_DEDUP_BATCH
-	if [ -n "$sudo_logs" ]; then
-		while IFS= read -r line; do
-			[[ -z "$line" ]] && continue
-			is_sudo_command_audit_line "$line" || continue
+ declare -A SUDO_DEDUP_BATCH
+ if [ -n "$sudo_logs" ]; then
+ while IFS= read -r line; do
+ [[ -z "$line" ]] && continue
+ is_sudo_command_audit_line "$line" || continue
 
-			local fp=""
-			if command -v sha256sum >/dev/null 2>&1; then
-				fp=$(printf '%s' "$line" | sha256sum | awk '{print $1}')
-			else
-				fp=$(printf '%s' "$line" | cksum | awk '{print $1}')
-			fi
-			[[ -n "$fp" && -n "${SUDO_DEDUP_BATCH[$fp]:-}" ]] && continue
-			[[ -n "$fp" ]] && SUDO_DEDUP_BATCH[$fp]=1
+ local fp=""
+ if command -v sha256sum >/dev/null 2>&1; then
+ fp=$(printf '%s' "$line" | sha256sum | awk '{print $1}')
+ else
+ fp=$(printf '%s' "$line" | cksum | awk '{print $1}')
+ fi
+ [[ -n "$fp" && -n "${SUDO_DEDUP_BATCH[$fp]:-}" ]] && continue
+ [[ -n "$fp" ]] && SUDO_DEDUP_BATCH[$fp]=1
 
-			local user sudo_cmd pwd run_as
-			parse_sudo_audit_line "$line" user sudo_cmd pwd run_as
+ local user sudo_cmd pwd run_as
+ parse_sudo_audit_line "$line" user sudo_cmd pwd run_as
 
-			if [ -n "$user" ] && [ -n "${sudo_cmd:-}" ]; then
-				local message=" ⚠️ ИСПОЛЬЗОВАНИЕ SUDO "$'\n'
-				message="${message}👤 Пользователь: ${user}"$'\n'
-				if [ -n "$run_as" ]; then
-					message="${message}🔑 От имени USER: ${run_as}"$'\n'
-				fi
-				message="${message}💻 Команда: ${sudo_cmd}"$'\n'
-				message="${message}📁 Директория: ${pwd:-unknown}"$'\n'
-				message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
-				notify_send "$message"
-				write_log "SUDO: $user выполнил $sudo_cmd${run_as:+ (USER=$run_as)}"
-			fi
-		done <<<"$sudo_logs"
-	fi
+ if [ -n "$user" ] && [ -n "${sudo_cmd:-}" ]; then
+ local message=" ⚠️ ИСПОЛЬЗОВАНИЕ SUDO "$'\n'
+ message="${message}👤 Пользователь: ${user}"$'\n'
+ if [ -n "$run_as" ]; then
+ message="${message}🔑 От имени USER: ${run_as}"$'\n'
+ fi
+ message="${message}💻 Команда: ${sudo_cmd}"$'\n'
+ message="${message}📁 Директория: ${pwd:-unknown}"$'\n'
+ message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$message"
+ write_log "SUDO: $user выполнил $sudo_cmd${run_as:+ (USER=$run_as)}"
+ fi
+ done <<<"$sudo_logs"
+ fi
 
-	echo "$current_time" >"$LAST_SUDO_CHECK_FILE"
+ echo "$current_time" >"$LAST_SUDO_CHECK_FILE"
 }
 
 # ============================================
@@ -868,63 +886,182 @@ monitor_sudo() {
 # ============================================
 
 monitor_security_events() {
-	local last_check="0"
-	if [ -f "$LAST_SECURITY_EVENTS_FILE" ]; then
-		last_check="$(<"$LAST_SECURITY_EVENTS_FILE")"
-	fi
-	if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
-		last_check=0
-	fi
-	if [ "$last_check" -eq 0 ]; then
-		last_check=$(($(date '+%s') - 3600))
-	fi
-	local now
-	now=$(date '+%s')
+ local last_check="0"
+ if [ -f "$LAST_SECURITY_EVENTS_FILE" ]; then
+ last_check="$(<"$LAST_SECURITY_EVENTS_FILE")"
+ fi
+ if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
+ last_check=0
+ fi
+ if [ "$last_check" -eq 0 ]; then
+ last_check=$(($(date '+%s') - 3600))
+ fi
+ local now
+ now=$(date '+%s')
 
-	local chunk=""
-	if command -v journalctl >/dev/null 2>&1; then
-		chunk=$(journalctl --since="@${last_check}" --until="now" 2>/dev/null | grep -Ei \
-			"REMOTE HOST IDENTIFICATION HAS CHANGED|POSSIBLE BREAK-IN ATTEMPT|reverse mapping checking getaddrinfo|Failed password" \
-			|| true)
-	fi
+ local chunk=""
+ if command -v journalctl >/dev/null 2>&1; then
+ chunk=$(journalctl --since="@${last_check}" --until="now" 2>/dev/null | grep -Ei \
+ "REMOTE HOST IDENTIFICATION HAS CHANGED|POSSIBLE BREAK-IN ATTEMPT|reverse mapping checking getaddrinfo|Failed password" \
+ || true)
+ fi
 
-	if [ -n "$chunk" ]; then
-		if echo "$chunk" | grep -Eqi "REMOTE HOST IDENTIFICATION HAS CHANGED"; then
-			local hk
-			hk="$(echo "$chunk" | grep -Ei "REMOTE HOST IDENTIFICATION HAS CHANGED" | head -n 3)"
-			local m=" 🔐 ВНИМАНИЕ: изменение SSH host key / MITM? "$'\n'
-			m="${m}$(printf '%s\n' "$hk")"
-			m="${m}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
-			notify_send "$m"
-			write_log "SECURITY: обнаружено сообщение об изменении host key"
-		fi
-	fi
+ if [ -n "$chunk" ]; then
+ if echo "$chunk" | grep -Eqi "REMOTE HOST IDENTIFICATION HAS CHANGED"; then
+ local hk
+ hk="$(echo "$chunk" | grep -Ei "REMOTE HOST IDENTIFICATION HAS CHANGED" | head -n 3)"
+ local m=" 🔐 ВНИМАНИЕ: изменение SSH host key / MITM? "$'\n'
+ m="${m}$(printf '%s\n' "$hk")"
+ m="${m}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$m"
+ write_log "SECURITY: обнаружено сообщение об изменении host key"
+ fi
+ fi
 
-	if command -v journalctl >/dev/null 2>&1; then
-		local brute_lines brute_ip count nowc lastn
-		brute_lines=$(journalctl -u ssh -u sshd --since="${BRUTE_WINDOW_SEC} seconds ago" 2>/dev/null | grep "Failed password" || true)
-		if [ -n "$brute_lines" ]; then
-			while IFS= read -r ip; do
-				[ -z "$ip" ] && continue
-				count=$(printf '%s\n' "$brute_lines" | grep -F "from ${ip} port" | wc -l | tr -d ' ')
-				if [ "${count:-0}" -ge "$BRUTE_MIN_FAILS" ]; then
-					nowc=$(date '+%s')
-					lastn="${BRUTE_LAST_NOTIFY[$ip]:-0}"
-					if [ $((nowc - lastn)) -ge "$BRUTE_NOTIFY_COOLDOWN_SEC" ]; then
-						BRUTE_LAST_NOTIFY[$ip]=$nowc
-						local bm=" 🧨 ВОЗМОЖНЫЙ МАССОВЫЙ БРУТФОРС SSH "$'\n'
-						bm="${bm}🌐 IP: ${ip}"$'\n'
-						bm="${bm}📊 Неудачных попыток за ~${BRUTE_WINDOW_SEC}s: ${count}"$'\n'
-						bm="${bm}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
-						notify_send "$bm"
-						write_log "SECURITY: массовый брутфорс? IP=$ip fails=${count} за окно ${BRUTE_WINDOW_SEC}s"
-					fi
-				fi
-			done < <(printf '%s\n' "$brute_lines" | sed -nE 's/.* from ([^ ]+) port .*/\1/p' | sort -u)
-		fi
-	fi
+ if command -v journalctl >/dev/null 2>&1; then
+ local brute_lines brute_ip count nowc lastn
+ brute_lines=$(journalctl -u ssh -u sshd --since="${BRUTE_WINDOW_SEC} seconds ago" 2>/dev/null | grep "Failed password" || true)
+ if [ -n "$brute_lines" ]; then
+ while IFS= read -r ip; do
+ [ -z "$ip" ] && continue
+ count=$(printf '%s\n' "$brute_lines" | grep -F "from ${ip} port" | wc -l | tr -d ' ')
+ if [ "${count:-0}" -ge "$BRUTE_MIN_FAILS" ]; then
+ nowc=$(date '+%s')
+ lastn="${BRUTE_LAST_NOTIFY[$ip]:-0}"
+ if [ $((nowc - lastn)) -ge "$BRUTE_NOTIFY_COOLDOWN_SEC" ]; then
+ BRUTE_LAST_NOTIFY[$ip]=$nowc
+ local bm=" 🧨 ВОЗМОЖНЫЙ МАССОВЫЙ БРУТФОРС SSH "$'\n'
+ bm="${bm}🌐 IP: ${ip}"$'\n'
+ bm="${bm}📊 Неудачных попыток за ~${BRUTE_WINDOW_SEC}s: ${count}"$'\n'
+ bm="${bm}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$bm"
+ write_log "SECURITY: массовый брутфорс? IP=$ip fails=${count} за окно ${BRUTE_WINDOW_SEC}s"
+ fi
+ fi
+ done < <(printf '%s\n' "$brute_lines" | sed -nE 's/.* from ([^ ]+) port .*/\1/p' | sort -u)
+ fi
+ fi
 
-	echo "$now" >"$LAST_SECURITY_EVENTS_FILE"
+ echo "$now" >"$LAST_SECURITY_EVENTS_FILE"
+}
+
+# ============================================
+# Локальные сессии (systemd-logind, journalctl)
+# ============================================
+
+logind_session_type() {
+ local sid="$1"
+ [ -z "$sid" ] && echo "" && return 0
+ if ! command -v loginctl >/dev/null 2>&1; then
+ echo ""
+ return 0
+ fi
+ loginctl show-session "$sid" -p Type 2>/dev/null | sed -n 's/^Type=//p' | tr -d '[:space:]'
+}
+
+parse_logind_new_session() {
+ local line="$1"
+ local -n out_sid="$2"
+ local -n out_user="$3"
+ out_sid=""
+ out_user=""
+ if [[ "$line" =~ [Nn]ew\ session[[:space:]]+([^[:space:]]+)[[:space:]]+of\ user\ \'([^\']+)\' ]]; then
+ out_sid="${BASH_REMATCH[1]}"
+ out_user="${BASH_REMATCH[2]}"
+ return 0
+ fi
+ if [[ "$line" =~ [Nn]ew\ session[[:space:]]+([^[:space:]]+)[[:space:]]+of\ user\ ([^[:space:].]+)\.? ]]; then
+ out_sid="${BASH_REMATCH[1]}"
+ out_user="${BASH_REMATCH[2]}"
+ return 0
+ fi
+ return 1
+}
+
+monitor_logind() {
+ if [ "${ENABLE_LOGIND_MONITOR:-1}" != "1" ]; then
+ return 0
+ fi
+ if ! command -v journalctl >/dev/null 2>&1; then
+ return 0
+ fi
+
+ local last_check="0"
+ if [ -f "$LAST_LOGIND_CHECK_FILE" ]; then
+ last_check="$(<"$LAST_LOGIND_CHECK_FILE")"
+ fi
+ if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
+ last_check=0
+ fi
+
+ local since_journal
+ if [ "$last_check" -eq 0 ]; then
+ since_journal="--since=-30m"
+ else
+ since_journal="--since=@${last_check}"
+ fi
+
+ local current_time
+ current_time=$(date '+%s')
+
+ local logind_lines
+ logind_lines=$(journalctl -u systemd-logind $since_journal --until="now" -o cat --no-pager 2>/dev/null || true)
+
+ if [ -n "$logind_lines" ]; then
+ while IFS= read -r line; do
+ [[ -z "$line" ]] && continue
+ local low
+ low=$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')
+
+ if [[ "$low" == *"new session"* ]]; then
+ if [ "${LOGIND_NOTIFY_NEW:-1}" = "1" ]; then
+ local sid="" user=""
+ if parse_logind_new_session "$line" sid user; then
+ if [ "${LOGIND_SKIP_REMOTE:-1}" = "1" ] && [ -n "$sid" ]; then
+ local st
+ st=$(logind_session_type "$sid")
+ if [ "$st" = "ssh" ]; then
+ write_log "LOGIND: новая сессия (тип ssh, уведомление от ssh-monitor): ${line}"
+ continue
+ fi
+ fi
+ local msg=" 🖥️ НОВАЯ СЕССИЯ (systemd-logind) "$'\n'
+ msg="${msg}👤 Пользователь: ${user:-неизвестно}"$'\n'
+ msg="${msg}🆔 Сессия: ${sid:-?}"$'\n'
+ msg="${msg}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$msg"
+ write_log "LOGIND: новая сессия: ${line}"
+ else
+ write_log "LOGIND: новая сессия (разбор user/sid не удался): ${line}"
+ fi
+ fi
+
+ elif [[ "$low" == *"removed session"* ]]; then
+ write_log "LOGIND: сессия завершена: $line"
+ if [ "${LOGIND_NOTIFY_REMOVED:-0}" = "1" ]; then
+ local sess_r=""
+ if [[ "$line" =~ [Rr]emoved\ session[[:space:]]+([^[:space:].]+) ]]; then
+ sess_r="${BASH_REMATCH[1]}"
+ fi
+ local msg_r=" 🚪 СЕССИЯ ЗАКРЫТА (systemd-logind) "$'\n'
+ msg_r="${msg_r}🆔 Сессия: ${sess_r:-?}"$'\n'
+ msg_r="${msg_r}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$msg_r"
+ fi
+
+ elif [[ "$low" == *"failed"* ]]; then
+ if [ "${LOGIND_NOTIFY_FAILED:-1}" = "1" ]; then
+ local msg_f=" ❌ СБОЙ (systemd-logind) "$'\n'
+ msg_f="${msg_f}📝 ${line}"$'\n'
+ msg_f="${msg_f}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$msg_f"
+ write_log "LOGIND: сбой: $line"
+ fi
+ fi
+ done <<<"$logind_lines"
+ fi
+
+ echo "$current_time" >"$LAST_LOGIND_CHECK_FILE"
 }
 
 # ============================================
@@ -932,141 +1069,141 @@ monitor_security_events() {
 # ============================================
 
 journal_count_since_24h() {
-	local pattern="$1"
-	local c
-	if command -v journalctl >/dev/null 2>&1; then
-		c=$(journalctl -u ssh -u sshd --since="24 hours ago" 2>/dev/null | grep -F -c "$pattern" || true)
-		echo "${c:-0}"
-	else
-		echo "0"
-	fi
+ local pattern="$1"
+ local c
+ if command -v journalctl >/dev/null 2>&1; then
+ c=$(journalctl -u ssh -u sshd --since="24 hours ago" 2>/dev/null | grep -F -c "$pattern" || true)
+ echo "${c:-0}"
+ else
+ echo "0"
+ fi
 }
 
 journal_sudo_count_24h() {
-	local c
-	if command -v journalctl >/dev/null 2>&1; then
-		c=$(journalctl --since="24 hours ago" --no-pager 2>/dev/null \
-			| grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' | wc -l | tr -d ' ' || true)
-		echo "${c:-0}"
-	else
-		echo "0"
-	fi
+ local c
+ if command -v journalctl >/dev/null 2>&1; then
+ c=$(journalctl --since="24 hours ago" --no-pager 2>/dev/null \
+ | grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' | wc -l | tr -d ' ' || true)
+ echo "${c:-0}"
+ else
+ echo "0"
+ fi
 }
 
 top_failed_ips_journal_24h() {
-	local n="$1"
-	journalctl -u ssh -u sshd --since="24 hours ago" 2>/dev/null \
-		| grep "Failed password" \
-		| sed -nE 's/.* from ([^ ]+) port .*/\1/p' \
-		| sort | uniq -c | sort -nr | head -n "$n" \
-		| awk '{gsub(/^ +/,"",$1); print $2 ":" $1}' || true
+ local n="$1"
+ journalctl -u ssh -u sshd --since="24 hours ago" 2>/dev/null \
+ | grep "Failed password" \
+ | sed -nE 's/.* from ([^ ]+) port .*/\1/p' \
+ | sort | uniq -c | sort -nr | head -n "$n" \
+ | awk '{gsub(/^ +/,"",$1); print $2 ":" $1}' || true
 }
 
 send_daily_report() {
-	local current_time
-	current_time=$(report_date '+%d.%m.%Y %H:%M:%S')
+ local current_time
+ current_time=$(report_date '+%d.%m.%Y %H:%M:%S')
 
-	local successful_logins failed_logins sudo_commands
-	local top_lines=""
-	local json_stats=""
+ local successful_logins failed_logins sudo_commands
+ local top_lines=""
+ local json_stats=""
 
-	if command -v journalctl >/dev/null 2>&1; then
-		successful_logins=$(journal_count_since_24h "Accepted")
-		failed_logins=$(journal_count_since_24h "Failed password")
-		sudo_commands=$(journal_sudo_count_24h)
-		top_lines=$(top_failed_ips_journal_24h "${DAILY_REPORT_TOP_IPS:-5}" | sed 's/^/ • /; s/:/ — /' || true)
-	else
-		json_stats="$(stats_auth_log_24h_json "${DAILY_REPORT_TOP_IPS:-5}")"
-		successful_logins=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['accepted'])" "$json_stats" 2>/dev/null || echo "0")
-		failed_logins=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['failed'])" "$json_stats" 2>/dev/null || echo "0")
-		sudo_commands=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['sudo'])" "$json_stats" 2>/dev/null || echo "0")
-		top_lines=$(printf '%s' "$json_stats" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(chr(10).join(' • '+t.replace(':',' — ',1) for t in d.get('top',[])))" 2>/dev/null || true)
-	fi
+ if command -v journalctl >/dev/null 2>&1; then
+ successful_logins=$(journal_count_since_24h "Accepted")
+ failed_logins=$(journal_count_since_24h "Failed password")
+ sudo_commands=$(journal_sudo_count_24h)
+ top_lines=$(top_failed_ips_journal_24h "${DAILY_REPORT_TOP_IPS:-5}" | sed 's/^/ • /; s/:/ — /' || true)
+ else
+ json_stats="$(stats_auth_log_24h_json "${DAILY_REPORT_TOP_IPS:-5}")"
+ successful_logins=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['accepted'])" "$json_stats" 2>/dev/null || echo "0")
+ failed_logins=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['failed'])" "$json_stats" 2>/dev/null || echo "0")
+ sudo_commands=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['sudo'])" "$json_stats" 2>/dev/null || echo "0")
+ top_lines=$(printf '%s' "$json_stats" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(chr(10).join(' • '+t.replace(':',' — ',1) for t in d.get('top',[])))" 2>/dev/null || true)
+ fi
 
-	local active_sessions
-	active_sessions=$(get_active_ssh_sessions)
-	local active_count
-	active_count=$(who 2>/dev/null | grep -c "." || echo "0")
+ local active_sessions
+ active_sessions=$(get_active_ssh_sessions)
+ local active_count
+ active_count=$(who 2>/dev/null | grep -c "." || echo "0")
 
-	local active_bans=0
-	local current_epoch
-	current_epoch=$(date '+%s')
-	if [ -f "$BAN_LIST_FILE" ]; then
-		while IFS='|' read -r ip ban_until attempts ban_time; do
-			if [ -n "$ip" ] && [ -n "$ban_until" ] && [ "$current_epoch" -lt "$ban_until" ]; then
-				active_bans=$((active_bans + 1))
-			fi
-		done <"$BAN_LIST_FILE"
-	fi
+ local active_bans=0
+ local current_epoch
+ current_epoch=$(date '+%s')
+ if [ -f "$BAN_LIST_FILE" ]; then
+ while IFS='|' read -r ip ban_until attempts ban_time; do
+ if [ -n "$ip" ] && [ -n "$ban_until" ] && [ "$current_epoch" -lt "$ban_until" ]; then
+ active_bans=$((active_bans + 1))
+ fi
+ done <"$BAN_LIST_FILE"
+ fi
 
-	local message=" 📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ SSH МОНИТОРИНГА "$'\n'
-	message="${message}🖥️ Сервер: $(hostname)"$'\n'
-	message="${message}🕐 Время отчета: ${current_time}"$'\n'
-	message="${message}"$'\n'
-	message="${message} 📈 СТАТИСТИКА ЗА ПОСЛЕДНИЕ 24 ЧАСА: "$'\n'
-	message="${message} ✅ Успешных SSH подключений: ${successful_logins:-0}"$'\n'
-	message="${message} ❌ Неудачных попыток SSH: ${failed_logins:-0}"$'\n'
-	message="${message} ⚠️ Команд через sudo: ${sudo_commands:-0}"$'\n'
-	message="${message} 🚫 Заблокировано IP: ${active_bans}"$'\n'
-	message="${message}"$'\n'
-	message="${message} 🧾 ТОП-${DAILY_REPORT_TOP_IPS} IP ПО НЕУДАЧНЫМ ПОПЫТКАМ:"$'\n'
-	if [ -n "$top_lines" ]; then
-		message="${message}${top_lines}"$'\n'
-	else
-		message="${message} (нет данных)"$'\n'
-	fi
-	message="${message}"$'\n'
-	message="${message} 👥 АКТИВНЫЕ ПОЛЬЗОВАТЕЛИ (${active_count}):"$'\n'
+ local message=" 📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ SSH МОНИТОРИНГА "$'\n'
+ message="${message}🖥️ Сервер: $(hostname)"$'\n'
+ message="${message}🕐 Время отчета: ${current_time}"$'\n'
+ message="${message}"$'\n'
+ message="${message} 📈 СТАТИСТИКА ЗА ПОСЛЕДНИЕ 24 ЧАСА: "$'\n'
+ message="${message} ✅ Успешных SSH подключений: ${successful_logins:-0}"$'\n'
+ message="${message} ❌ Неудачных попыток SSH: ${failed_logins:-0}"$'\n'
+ message="${message} ⚠️ Команд через sudo: ${sudo_commands:-0}"$'\n'
+ message="${message} 🚫 Заблокировано IP: ${active_bans}"$'\n'
+ message="${message}"$'\n'
+ message="${message} 🧾 ТОП-${DAILY_REPORT_TOP_IPS} IP ПО НЕУДАЧНЫМ ПОПЫТКАМ:"$'\n'
+ if [ -n "$top_lines" ]; then
+ message="${message}${top_lines}"$'\n'
+ else
+ message="${message} (нет данных)"$'\n'
+ fi
+ message="${message}"$'\n'
+ message="${message} 👥 АКТИВНЫЕ ПОЛЬЗОВАТЕЛИ (${active_count}):"$'\n'
 
-	if [ -n "$active_sessions" ]; then
-		message="${message}${active_sessions}"$'\n'
-	else
-		message="${message} Нет активных пользователей"$'\n'
-	fi
+ if [ -n "$active_sessions" ]; then
+ message="${message}${active_sessions}"$'\n'
+ else
+ message="${message} Нет активных пользователей"$'\n'
+ fi
 
-	notify_send "$message"
-	write_log "Ежедневный отчет отправлен"
+ notify_send "$message"
+ write_log "Ежедневный отчет отправлен"
 
-	echo "$(report_date '+%F')" >"$LAST_REPORT_FILE"
+ echo "$(report_date '+%F')" >"$LAST_REPORT_FILE"
 }
 
 read_last_report_date() {
-	if [ ! -f "$LAST_REPORT_FILE" ]; then
-		echo ""
-		return
-	fi
-	local raw
-	raw="$(tr -d ' \t\r\n' <"$LAST_REPORT_FILE" || true)"
-	if [[ "$raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-		echo "$raw"
-		return
-	fi
-	if [[ "$raw" =~ ^[0-9]+$ ]]; then
-		report_date -d "@$raw" '+%F' 2>/dev/null || echo ""
-		return
-	fi
-	echo ""
+ if [ ! -f "$LAST_REPORT_FILE" ]; then
+ echo ""
+ return
+ fi
+ local raw
+ raw="$(tr -d ' \t\r\n' <"$LAST_REPORT_FILE" || true)"
+ if [[ "$raw" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+ echo "$raw"
+ return
+ fi
+ if [[ "$raw" =~ ^[0-9]+$ ]]; then
+ report_date -d "@$raw" '+%F' 2>/dev/null || echo ""
+ return
+ fi
+ echo ""
 }
 
 check_daily_report() {
-	local today
-	today=$(report_date '+%F')
-	local last_date
-	last_date="$(read_last_report_date)"
+ local today
+ today=$(report_date '+%F')
+ local last_date
+ last_date="$(read_last_report_date)"
 
-	if [ "$last_date" = "$today" ]; then
-		return 0
-	fi
+ if [ "$last_date" = "$today" ]; then
+ return 0
+ fi
 
-	local cur_h cur_m cur_mins rep_mins
-	cur_h=$(report_date '+%-H')
-	cur_m=$(report_date '+%-M')
-	cur_mins=$((10#$cur_h * 60 + 10#$cur_m))
-	rep_mins=$((10#$DAILY_REPORT_HOUR * 60 + 0))
+ local cur_h cur_m cur_mins rep_mins
+ cur_h=$(report_date '+%-H')
+ cur_m=$(report_date '+%-M')
+ cur_mins=$((10#$cur_h * 60 + 10#$cur_m))
+ rep_mins=$((10#$DAILY_REPORT_HOUR * 60 + 0))
 
-	if [ "$cur_mins" -ge "$rep_mins" ]; then
-		send_daily_report
-	fi
+ if [ "$cur_mins" -ge "$rep_mins" ]; then
+ send_daily_report
+ fi
 }
 
 # ============================================
@@ -1074,34 +1211,34 @@ check_daily_report() {
 # ============================================
 
 send_heartbeat() {
-	local timestamp
-	timestamp=$(date '+%s')
-	local timestamp_human
-	timestamp_human=$(date '+%d.%m.%Y %H:%M:%S')
+ local timestamp
+ timestamp=$(date '+%s')
+ local timestamp_human
+ timestamp_human=$(date '+%d.%m.%Y %H:%M:%S')
 
-	local message=" ❤️ Heartbeat - скрипт мониторинга работает "$'\n'
-	message="${message}🖥️ Сервер: $(hostname)"$'\n'
-	message="${message}🕐 Время: ${timestamp_human}"
+ local message=" ❤️ Heartbeat - скрипт мониторинга работает "$'\n'
+ message="${message}🖥️ Сервер: $(hostname)"$'\n'
+ message="${message}🕐 Время: ${timestamp_human}"
 
-	notify_send "$message"
-	echo "$timestamp" >"$LAST_HEARTBEAT_FILE"
-	write_log "Heartbeat отправлен"
+ notify_send "$message"
+ echo "$timestamp" >"$LAST_HEARTBEAT_FILE"
+ write_log "Heartbeat отправлен"
 }
 
 check_heartbeat() {
-	local last_heartbeat_epoch=0
+ local last_heartbeat_epoch=0
 
-	if [ -f "$LAST_HEARTBEAT_FILE" ]; then
-		last_heartbeat_epoch=$(cat "$LAST_HEARTBEAT_FILE" 2>/dev/null || echo "0")
-	fi
+ if [ -f "$LAST_HEARTBEAT_FILE" ]; then
+ last_heartbeat_epoch=$(cat "$LAST_HEARTBEAT_FILE" 2>/dev/null || echo "0")
+ fi
 
-	local current_epoch
-	current_epoch=$(date '+%s')
-	local diff=$((current_epoch - last_heartbeat_epoch))
+ local current_epoch
+ current_epoch=$(date '+%s')
+ local diff=$((current_epoch - last_heartbeat_epoch))
 
-	if [ "$last_heartbeat_epoch" -eq 0 ] || [ "$diff" -ge 43200 ]; then
-		send_heartbeat
-	fi
+ if [ "$last_heartbeat_epoch" -eq 0 ] || [ "$diff" -ge 43200 ]; then
+ send_heartbeat
+ fi
 }
 
 # ============================================
@@ -1109,23 +1246,23 @@ check_heartbeat() {
 # ============================================
 
 write_health_and_metrics() {
-	local ts
-	ts=$(date '+%s')
-	if [ -n "${HEALTHCHECK_STATUS_FILE:-}" ]; then
-		mkdir -p "$(dirname "$HEALTHCHECK_STATUS_FILE")" 2>/dev/null || true
-		printf '{"ts":%s,"hostname":"%s","dry_run":%s}\n' "$ts" "$(hostname | sed 's/"/\\"/g')" "$([[ "${DRY_RUN:-0}" = "1" ]] && echo true || echo false)" >"${HEALTHCHECK_STATUS_FILE}.tmp"
-		mv "${HEALTHCHECK_STATUS_FILE}.tmp" "$HEALTHCHECK_STATUS_FILE" 2>/dev/null || true
-	fi
-	if [ -n "${PROMETHEUS_TEXTFILE_DIR:-}" ]; then
-		mkdir -p "$PROMETHEUS_TEXTFILE_DIR" 2>/dev/null || true
-		local f="$PROMETHEUS_TEXTFILE_DIR/ssh_monitor.prom"
-		{
-			echo "# HELP ssh_monitor_last_loop_unixtime Unix time последней итерации цикла ssh-monitor"
-			echo "# TYPE ssh_monitor_last_loop_unixtime gauge"
-			printf 'ssh_monitor_last_loop_unixtime %s\n' "$ts"
-		} >"${f}.tmp"
-		mv "${f}.tmp" "$f" 2>/dev/null || true
-	fi
+ local ts
+ ts=$(date '+%s')
+ if [ -n "${HEALTHCHECK_STATUS_FILE:-}" ]; then
+ mkdir -p "$(dirname "$HEALTHCHECK_STATUS_FILE")" 2>/dev/null || true
+ printf '{"ts":%s,"hostname":"%s","dry_run":%s}\n' "$ts" "$(hostname | sed 's/"/\\"/g')" "$([[ "${DRY_RUN:-0}" = "1" ]] && echo true || echo false)" >"${HEALTHCHECK_STATUS_FILE}.tmp"
+ mv "${HEALTHCHECK_STATUS_FILE}.tmp" "$HEALTHCHECK_STATUS_FILE" 2>/dev/null || true
+ fi
+ if [ -n "${PROMETHEUS_TEXTFILE_DIR:-}" ]; then
+ mkdir -p "$PROMETHEUS_TEXTFILE_DIR" 2>/dev/null || true
+ local f="$PROMETHEUS_TEXTFILE_DIR/ssh_monitor.prom"
+ {
+ echo "# HELP ssh_monitor_last_loop_unixtime Unix time последней итерации цикла ssh-monitor"
+ echo "# TYPE ssh_monitor_last_loop_unixtime gauge"
+ printf 'ssh_monitor_last_loop_unixtime %s\n' "$ts"
+ } >"${f}.tmp"
+ mv "${f}.tmp" "$f" 2>/dev/null || true
+ fi
 }
 
 # ============================================
@@ -1133,97 +1270,101 @@ write_health_and_metrics() {
 # ============================================
 
 send_startup_notification() {
-	local timestamp
-	timestamp=$(date '+%d.%m.%Y %H:%M:%S')
-	local whitelist_count=$((${#WHITELIST_IPS[@]} + ${#WHITELIST_SUBNETS[@]}))
+ local timestamp
+ timestamp=$(date '+%d.%m.%Y %H:%M:%S')
+ local whitelist_count=$((${#WHITELIST_IPS[@]} + ${#WHITELIST_SUBNETS[@]}))
 
-	local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН "$'\n'
-	message="${message}🖥️ Сервер: $(hostname)"$'\n'
-	message="${message}🕐 Время запуска: ${timestamp}"$'\n'
-	message="${message}📊 Мониторинг SSH и SUDO активирован"$'\n'
-	message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд"$'\n'
-	message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей"$'\n'
-	message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"
+ local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН "$'\n'
+ message="${message}🖥️ Сервер: $(hostname)"$'\n'
+ message="${message}🕐 Время запуска: ${timestamp}"$'\n'
+ message="${message}📊 Мониторинг SSH, SUDO и systemd-logind активирован"$'\n'
+ message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд"$'\n'
+ message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей"$'\n'
+ message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"
 
-	notify_send "$message"
-	write_log "Скрипт мониторинга запущен (белый список: $whitelist_count записей)"
+ notify_send "$message"
+ write_log "Скрипт мониторинга запущен (белый список: $whitelist_count записей)"
 }
 
 send_shutdown_notification() {
-	[ "${SHUTDOWN_NOTIFIED:-0}" = "1" ] && return 0
-	SHUTDOWN_NOTIFIED=1
+ [ "${SHUTDOWN_NOTIFIED:-0}" = "1" ] && return 0
+ SHUTDOWN_NOTIFIED=1
 
-	local timestamp
-	timestamp=$(date '+%d.%m.%Y %H:%M:%S')
-	local message=" ⚠️ СКРИПТ МОНИТОРИНГА ОСТАНОВЛЕН "$'\n'
-	message="${message}🖥️ Сервер: $(hostname)"$'\n'
-	message="${message}🕐 Время остановки: ${timestamp}"
+ local timestamp
+ timestamp=$(date '+%d.%m.%Y %H:%M:%S')
+ local message=" ⚠️ СКРИПТ МОНИТОРИНГА ОСТАНОВЛЕН "$'\n'
+ message="${message}🖥️ Сервер: $(hostname)"$'\n'
+ message="${message}🕐 Время остановки: ${timestamp}"
 
-	notify_send "$message"
-	write_log "Скрипт мониторинга остановлен"
+ notify_send "$message"
+ write_log "Скрипт мониторинга остановлен"
 }
 
 main() {
-	if [ "$EUID" -ne 0 ] && [ "${DRY_RUN:-0}" != "1" ]; then
-		echo "Пожалуйста, запустите скрипт от имени root (sudo $0)"
-		exit 1
-	fi
+ if [ "$EUID" -ne 0 ] && [ "${DRY_RUN:-0}" != "1" ]; then
+ echo "Пожалуйста, запустите скрипт от имени root (sudo $0)"
+ exit 1
+ fi
 
-	load_whitelist_from_file
-	load_existing_bans
-	send_startup_notification
+ load_whitelist_from_file
+ load_existing_bans
+ send_startup_notification
 
-	local last_ban_check
-	last_ban_check=$(date '+%s')
+ local last_ban_check
+ last_ban_check=$(date '+%s')
 
-	while true; do
-		monitor_ssh
-		monitor_sudo
-		monitor_security_events
-		check_daily_report
-		check_heartbeat
-		write_health_and_metrics
+ while true; do
+ monitor_ssh
+ monitor_sudo
+ monitor_security_events
+ monitor_logind
+ check_daily_report
+ check_heartbeat
+ write_health_and_metrics
 
-		local current_time
-		current_time=$(date '+%s')
-		if [ $((current_time - last_ban_check)) -ge "$BAN_CHECK_INTERVAL" ]; then
-			unblock_expired_ips
-			verify_ban_list_vs_firewall
-			last_ban_check=$current_time
-		fi
+ local current_time
+ current_time=$(date '+%s')
+ if [ $((current_time - last_ban_check)) -ge "$BAN_CHECK_INTERVAL" ]; then
+ unblock_expired_ips
+ verify_ban_list_vs_firewall
+ last_ban_check=$current_time
+ fi
 
-		sleep "$MONITOR_INTERVAL"
-	done
+ sleep "$MONITOR_INTERVAL"
+ done
 }
 
 run_check_config() {
-	printf 'Проверка конфигурации ssh-monitor\n'
-	printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
-	printf 'TELEGRAM: %s\n' "$([ -n "$TELEGRAM_BOT_TOKEN" ] && echo настроен || echo НЕ настроен)"
-	printf 'BACKUP_WEBHOOK_URL: %s\n' "$([ -n "${BACKUP_WEBHOOK_URL:-}" ] && echo настроен || echo не задан)"
-	printf 'LOG_FILE=%s\n' "$LOG_FILE"
-	printf 'DAILY_REPORT_HOUR=%s\n' "$DAILY_REPORT_HOUR"
-	printf 'DAILY_REPORT_TZ=%s (пусто = зона процесса/date)\n' "${DAILY_REPORT_TZ:-}"
-	printf 'DAILY_REPORT_TOP_IPS=%s\n' "$DAILY_REPORT_TOP_IPS"
-	printf 'BRUTE_WINDOW_SEC=%s BRUTE_MIN_FAILS=%s\n' "$BRUTE_WINDOW_SEC" "$BRUTE_MIN_FAILS"
-	printf 'PROMETHEUS_TEXTFILE_DIR=%s\n' "${PROMETHEUS_TEXTFILE_DIR:-}"
-	printf 'HEALTHCHECK_STATUS_FILE=%s\n' "${HEALTHCHECK_STATUS_FILE:-}"
-	if bash -n "$0" 2>/dev/null; then
-		printf 'bash -n: OK\n'
-	else
-		printf 'bash -n: ОШИБКА\n' >&2
-		return 1
-	fi
-	return 0
+ printf 'Проверка конфигурации ssh-monitor\n'
+ printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
+ printf 'TELEGRAM: %s\n' "$([ -n "$TELEGRAM_BOT_TOKEN" ] && echo настроен || echo НЕ настроен)"
+ printf 'BACKUP_WEBHOOK_URL: %s\n' "$([ -n "${BACKUP_WEBHOOK_URL:-}" ] && echo настроен || echo не задан)"
+ printf 'LOG_FILE=%s\n' "$LOG_FILE"
+ printf 'DAILY_REPORT_HOUR=%s\n' "$DAILY_REPORT_HOUR"
+ printf 'DAILY_REPORT_TZ=%s (пусто = зона процесса/date)\n' "${DAILY_REPORT_TZ:-}"
+ printf 'DAILY_REPORT_TOP_IPS=%s\n' "$DAILY_REPORT_TOP_IPS"
+ printf 'BRUTE_WINDOW_SEC=%s BRUTE_MIN_FAILS=%s\n' "$BRUTE_WINDOW_SEC" "$BRUTE_MIN_FAILS"
+ printf 'PROMETHEUS_TEXTFILE_DIR=%s\n' "${PROMETHEUS_TEXTFILE_DIR:-}"
+ printf 'HEALTHCHECK_STATUS_FILE=%s\n' "${HEALTHCHECK_STATUS_FILE:-}"
+ printf 'ENABLE_LOGIND_MONITOR=%s LAST_LOGIND_CHECK_FILE=%s\n' "${ENABLE_LOGIND_MONITOR:-}" "${LAST_LOGIND_CHECK_FILE:-}"
+ printf 'LOGIND_NOTIFY_NEW=%s LOGIND_NOTIFY_REMOVED=%s LOGIND_NOTIFY_FAILED=%s LOGIND_SKIP_REMOTE=%s\n' \
+  "${LOGIND_NOTIFY_NEW:-}" "${LOGIND_NOTIFY_REMOVED:-}" "${LOGIND_NOTIFY_FAILED:-}" "${LOGIND_SKIP_REMOTE:-}"
+ if bash -n "$0" 2>/dev/null; then
+ printf 'bash -n: OK\n'
+ else
+ printf 'bash -n: ОШИБКА\n' >&2
+ return 1
+ fi
+ return 0
 }
 
 parse_args() {
-	for a in "$@"; do
-		case "$a" in
-		--check-config) CHECK_CONFIG_ONLY=1 ;;
-		--dry-run) DRY_RUN=1 ;;
-		esac
-	done
+ for a in "$@"; do
+ case "$a" in
+ --check-config) CHECK_CONFIG_ONLY=1 ;;
+ --dry-run) DRY_RUN=1 ;;
+ esac
+ done
 }
 
 # ============================================
@@ -1236,8 +1377,8 @@ load_config
 validate_config
 
 if [ "$CHECK_CONFIG_ONLY" = "1" ]; then
-	run_check_config
-	exit $?
+ run_check_config
+ exit $?
 fi
 
 trap send_shutdown_notification EXIT INT TERM
@@ -1248,7 +1389,7 @@ touch "$LOG_FILE"
 write_log "Конфигурация загружена из $CONFIG_FILE (или дефолты)"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
-	write_log "Режим DRY-RUN: iptables/ip6tables не меняются, уведомления печатаются в stderr"
+ write_log "Режим DRY-RUN: iptables/ip6tables не меняются, уведомления печатаются в stderr"
 fi
 
 main

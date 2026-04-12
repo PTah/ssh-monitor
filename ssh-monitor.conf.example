@@ -10,7 +10,16 @@ LAST_REPORT_FILE="/var/log/last_daily_report.txt"
 LAST_SSH_CHECK_FILE="/var/log/last_ssh_check"
 LAST_SUDO_CHECK_FILE="/var/log/last_sudo_check"
 LAST_SECURITY_EVENTS_FILE="/var/log/last_security_events_check"
+LAST_LOGIND_CHECK_FILE="/var/log/last_logind_check"
 BAN_LIST_FILE="/var/log/ssh_bans.txt"
+
+# systemd-logind: 1 = включено, 0 = выключено
+ENABLE_LOGIND_MONITOR="1"
+LOGIND_NOTIFY_NEW="1"
+LOGIND_NOTIFY_REMOVED="0"
+LOGIND_NOTIFY_FAILED="1"
+# 1 = не дублировать Telegram для новых сессий с типом ssh (уведомление уже есть из SSH-монитора)
+LOGIND_SKIP_REMOTE="1"
 
 DAILY_REPORT_HOUR="9"
 # IANA-зона для «9:00» и календарной даты отчёта; пусто = как у команды date (обычно локаль сервера, см. timedatectl)

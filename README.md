@@ -1,24 +1,25 @@
 # ssh-monitor
 
-Bash-скрипт мониторинга SSH/SUDO с уведомлениями в Telegram, опциональным резервным webhook, авто-блокировкой IP (IPv4 через `iptables`, IPv6 через `ip6tables` при наличии) и ежедневным отчётом.
+Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`systemd-logind`** (локальные/графические сессии и др.) с уведомлениями в Telegram, опциональным резервным webhook, авто-блокировкой IP (IPv4 через `iptables`, IPv6 через `ip6tables` при наличии) и ежедневным отчётом.
 
 ## Конфигурация
 
 Скрипт читает параметры из `/etc/ssh-monitor.conf` в формате `KEY="value"`.
 
 1. Скопируйте пример:
-   - `sudo cp ./ssh-monitor.conf.example /etc/ssh-monitor.conf`
+ - `sudo cp ./ssh-monitor.conf.example /etc/ssh-monitor.conf`
 2. Ограничьте доступ:
-   - `sudo chmod 600 /etc/ssh-monitor.conf`
+ - `sudo chmod 600 /etc/ssh-monitor.conf`
 3. Заполните минимум:
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_CHAT_ID`
+ - `TELEGRAM_BOT_TOKEN`
+ - `TELEGRAM_CHAT_ID`
 
 Поддерживаемые параметры:
 
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 - `BACKUP_WEBHOOK_URL` — резервная доставка JSON `{"text":"..."}` (например Slack Incoming Webhook), если Telegram недоступен или вернул ошибку
-- `LOG_FILE`, `LAST_HEARTBEAT_FILE`, `LAST_REPORT_FILE`, `LAST_SSH_CHECK_FILE`, `LAST_SUDO_CHECK_FILE`, `LAST_SECURITY_EVENTS_FILE`, `BAN_LIST_FILE`
+- `LOG_FILE`, `LAST_HEARTBEAT_FILE`, `LAST_REPORT_FILE`, `LAST_SSH_CHECK_FILE`, `LAST_SUDO_CHECK_FILE`, `LAST_SECURITY_EVENTS_FILE`, `LAST_LOGIND_CHECK_FILE`, `BAN_LIST_FILE`
+- `ENABLE_LOGIND_MONITOR`, `LOGIND_NOTIFY_NEW`, `LOGIND_NOTIFY_REMOVED`, `LOGIND_NOTIFY_FAILED`, `LOGIND_SKIP_REMOTE` — см. раздел «Мониторинг systemd-logind» ниже
 - `DAILY_REPORT_HOUR` (0..23), `DAILY_REPORT_TZ` (опционально), `DAILY_REPORT_TOP_IPS`
 - `BRUTE_WINDOW_SEC`, `BRUTE_MIN_FAILS`, `BRUTE_NOTIFY_COOLDOWN_SEC`
 - `PROMETHEUS_TEXTFILE_DIR` — каталог для `ssh_monitor.prom` (совместимость с node_exporter textfile collector)
@@ -40,7 +41,13 @@ Bash-скрипт мониторинга SSH/SUDO с уведомлениями 
 - `LAST_SSH_CHECK_FILE` — файл с меткой времени последней проверки SSH-событий.
 - `LAST_SUDO_CHECK_FILE` — файл с меткой времени последней проверки sudo-событий.
 - `LAST_SECURITY_EVENTS_FILE` — метка последней проверки «тяжёлых» событий безопасности в журнале.
+- `LAST_LOGIND_CHECK_FILE` — метка последней обработки журнала `systemd-logind` (unix-время); при первом запуске подтягивается около 30 минут истории.
 - `BAN_LIST_FILE` — файл состояния банов (IP, время окончания бана и метаданные).
+- `ENABLE_LOGIND_MONITOR` — `1` включает опрос `journalctl -u systemd-logind`, `0` полностью отключает этот блок.
+- `LOGIND_NOTIFY_NEW` — `1` отправлять Telegram при появлении новой сессии в logind (строки вида *New session … of user …*).
+- `LOGIND_NOTIFY_REMOVED` — `1` отправлять Telegram при завершении сессии (*Removed session …*); по умолчанию `0` (только запись в `LOG_FILE`, чтобы не заспамить канал).
+- `LOGIND_NOTIFY_FAILED` — `1` отправлять Telegram по строкам logind, содержащим *failed* (широкий фильтр; при необходимости отключите).
+- `LOGIND_SKIP_REMOTE` — `1` (по умолчанию): для новой сессии, если доступен `loginctl`, запрашивается тип сессии; при `Type=ssh` **второе** уведомление в Telegram не отправляется (успешный SSH уже покрывает `monitor_ssh`), в лог пишется пояснение. Поставьте `0`, если нужны отдельные алерты logind и для SSH-сессий.
 - `DAILY_REPORT_HOUR` — час (0..23), после наступления которого в **текущих календарных сутках** (в выбранной ниже зоне) отправляется не более одного ежедневного отчёта.
 - `DAILY_REPORT_TZ` — необязательная **IANA**-зона (`Europe/Moscow`, `Asia/Yekaterinburg`, …). Если **пусто**, для отчёта используется та же зона, что и у команды `date` у процесса монитора (как правило, совпадает с `timedatectl` / `/etc/localtime` на сервере). Если сервис запускается с `TZ=UTC` в unit-файле, без `DAILY_REPORT_TZ` отчёт ориентируется на **UTC** — тогда задайте явную зону в конфиге.
 - `DAILY_REPORT_TOP_IPS` — сколько IP показывать в топе неудачных попыток за 24 часа.
@@ -59,6 +66,15 @@ Bash-скрипт мониторинга SSH/SUDO с уведомлениями 
 - `WATCHDOG_LOG_FILE` — лог-файл watchdog-скрипта.
 - `WATCHDOG_SERVICE_NAME` — имя systemd-сервиса, который контролирует watchdog (по умолчанию `ssh-monitor.service`).
 - `WATCHDOG_NOTIFY_ON_RECOVERY` — `1` включает служебные сообщения watchdog при штатном состоянии, `0` отключает.
+
+### Мониторинг systemd-logind
+
+- Собираются сообщения юнита **`systemd-logind`** через **`journalctl`** (`-o cat`): новые и завершённые сессии, а также строки с подстрокой *failed* (если включено).
+- Без **`journalctl`** на хосте этот блок **не работает** (как и часть других функций, завязанных на journal).
+- Для разбора «новой сессии» используются типичные англоязычные форматы (`New session … of user …`). При несовпадении формата строка всё равно попадёт в лог с пометкой о неудачном разборе.
+- **`loginctl`** нужен только для **`LOGIND_SKIP_REMOTE`**: определяется `Type` сессии; для удалённого SSH обычно `ssh`, чтобы не дублировать уведомление с блоком мониторинга SSH.
+
+Команда **`ssh-monitor --check-config`** выводит актуальные значения, в том числе параметры logind.
 
 ## Режимы запуска
 
@@ -89,10 +105,10 @@ bash -n ./ssh-monitor
 ## Автозапуск через systemd
 
 1. Скопируйте скрипт в постоянное место:
-   - `sudo install -m 750 ./ssh-monitor /usr/local/bin/ssh-monitor`
+ - `sudo install -m 750 ./ssh-monitor /usr/local/bin/ssh-monitor`
 2. Убедитесь, что конфиг есть:
-   - `sudo cp ./ssh-monitor.conf.example /etc/ssh-monitor.conf` (если еще не создан)
-   - `sudo chmod 600 /etc/ssh-monitor.conf`
+ - `sudo cp ./ssh-monitor.conf.example /etc/ssh-monitor.conf` (если еще не создан)
+ - `sudo chmod 600 /etc/ssh-monitor.conf`
 3. Создайте unit-файл `/etc/systemd/system/ssh-monitor.service`:
 
 ```ini
@@ -129,11 +145,13 @@ sudo journalctl -u ssh-monitor -f
 
 ## Ротация логов
 
-Пример для `logrotate` лежит в репозитории: `contrib/logrotate.d/ssh-monitor`. Скопируйте файл в `/etc/logrotate.d/` и при необходимости поправьте пути под ваши `LOG_FILE` / `WATCHDOG_LOG_FILE`.
+Пример для `logrotate` лежит в репозитории: `contrib/logrotate.d/ssh-monitor`. Скопируйте файл в `/etc/logrotate.d/` и при необходимости поправьте пути под ваши `LOG_FILE` / `WATCHDOG_LOG_FILE` и другие файлы состояния в `/var/log/` (в т.ч. `LAST_*`, если решите их ротировать отдельно).
 
 ## Статистика без systemd (`journalctl`)
 
 Для корректного подсчёта событий за последние 24 часа по файлам `/var/log/auth.log*` рекомендуется наличие **Python 3** на сервере. При его отсутствии счётчики в ежедневном отчёте для «классического» syslog могут быть занижены (используется безопасный fallback).
+
+**Мониторинг `systemd-logind`** и другие части, использующие **`journalctl`**, на таких системах **не выполняются** или дают неполные данные — ориентируйтесь на окружение с **systemd** и доступным журналом.
 
 ## Watchdog (автоматическое восстановление)
 
@@ -147,10 +165,10 @@ Watchdog проверяет:
 ### Установка watchdog
 
 1. Установите watchdog-скрипт:
-   - `sudo install -m 750 ./ssh-monitor-watchdog /usr/local/bin/ssh-monitor-watchdog`
+ - `sudo install -m 750 ./ssh-monitor-watchdog /usr/local/bin/ssh-monitor-watchdog`
 2. Создайте unit и timer из примеров:
-   - `sudo cp ./ssh-monitor-watchdog.service.example /etc/systemd/system/ssh-monitor-watchdog.service`
-   - `sudo cp ./ssh-monitor-watchdog.timer.example /etc/systemd/system/ssh-monitor-watchdog.timer`
+ - `sudo cp ./ssh-monitor-watchdog.service.example /etc/systemd/system/ssh-monitor-watchdog.service`
+ - `sudo cp ./ssh-monitor-watchdog.timer.example /etc/systemd/system/ssh-monitor-watchdog.timer`
 3. Примените и запустите timer:
 
 ```bash
