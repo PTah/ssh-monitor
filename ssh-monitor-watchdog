@@ -45,8 +45,7 @@ send_backup_webhook_raw() {
 	if ! command -v python3 >/dev/null 2>&1; then
 		return 1
 	fi
-	local plain
-	plain="$(printf '%s' "$message" | sed 's/%0A/\n/g')"
+	local plain="$message"
 	local payload
 	payload="$(BACKUP_MSG="$plain" python3 - <<'PY'
 import json, os
@@ -105,16 +104,16 @@ restart_monitor() {
 	local reason="$1"
 	write_log "Watchdog: перезапуск $WATCHDOG_SERVICE_NAME, причина: $reason"
 	if systemctl restart "$WATCHDOG_SERVICE_NAME"; then
-		local msg=" ⚠️ WATCHDOG: монитор перезапущен %0A"
-		msg="${msg}Сервис: ${WATCHDOG_SERVICE_NAME}%0A"
-		msg="${msg}Причина: ${reason}%0A"
+		local msg=" ⚠️ WATCHDOG: монитор перезапущен "$'\n'
+		msg="${msg}Сервис: ${WATCHDOG_SERVICE_NAME}"$'\n'
+		msg="${msg}Причина: ${reason}"$'\n'
 		msg="${msg}Время: $(date '+%d.%m.%Y %H:%M:%S')"
 		notify_send "$msg"
 	else
 		write_log "Watchdog: ошибка перезапуска $WATCHDOG_SERVICE_NAME"
-		local msg=" ❌ WATCHDOG: не удалось перезапустить монитор %0A"
-		msg="${msg}Сервис: ${WATCHDOG_SERVICE_NAME}%0A"
-		msg="${msg}Причина: ${reason}%0A"
+		local msg=" ❌ WATCHDOG: не удалось перезапустить монитор "$'\n'
+		msg="${msg}Сервис: ${WATCHDOG_SERVICE_NAME}"$'\n'
+		msg="${msg}Причина: ${reason}"$'\n'
 		msg="${msg}Время: $(date '+%d.%m.%Y %H:%M:%S')"
 		notify_send "$msg"
 		return 1

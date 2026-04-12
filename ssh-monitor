@@ -332,8 +332,7 @@ send_backup_webhook_raw() {
 	if ! command -v python3 >/dev/null 2>&1; then
 		return 1
 	fi
-	local plain
-	plain="$(printf '%s' "$message" | sed 's/%0A/\n/g')"
+	local plain="$message"
 	local payload
 	payload="$(BACKUP_MSG="$plain" python3 - <<'PY'
 import json, os
@@ -351,7 +350,7 @@ PY
 notify_send() {
 	local message="$1"
 	if [ "${DRY_RUN:-0}" = "1" ]; then
-		printf '[DRY-RUN notify] %s\n' "$(printf '%s' "$message" | sed 's/%0A/ | /g')" >&2
+		printf '[DRY-RUN notify] %s\n' "$(printf '%s' "$message" | tr '\n' ' ')" >&2
 		return 0
 	fi
 	if send_telegram_raw "$message"; then
@@ -518,10 +517,10 @@ block_ip() {
 	save_iptables_rules
 
 	local ban_time_hours=$((BAN_TIME / 3600))
-	local message=" 🚫 IP ЗАБЛОКИРОВАН АВТОМАТИЧЕСКИ %0A"
-	message="${message}🌐 IP: ${ip}%0A"
-	message="${message}📊 Неудачных попыток: ${attempts}%0A"
-	message="${message}⏱️ Блокировка на: ${ban_time_hours} час(ов)%0A"
+	local message=" 🚫 IP ЗАБЛОКИРОВАН АВТОМАТИЧЕСКИ "$'\n'
+	message="${message}🌐 IP: ${ip}"$'\n'
+	message="${message}📊 Неудачных попыток: ${attempts}"$'\n'
+	message="${message}⏱️ Блокировка на: ${ban_time_hours} час(ов)"$'\n'
 	message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
 	notify_send "$message"
 	write_log "AUTO-BAN: IP $ip заблокирован на $ban_time_hours часов ($attempts попыток)"
@@ -545,8 +544,8 @@ unblock_expired_ips() {
 					do_firewall_del_drop "$ip"
 					write_log "UNBAN: IP $ip разблокирован (время блокировки истекло)"
 
-					local message=" 🔓 IP РАЗБЛОКИРОВАН %0A"
-					message="${message}🌐 IP: ${ip}%0A"
+					local message=" 🔓 IP РАЗБЛОКИРОВАН "$'\n'
+					message="${message}🌐 IP: ${ip}"$'\n'
 					message="${message}🕐 Время разблокировки: $(date '+%d.%m.%Y %H:%M:%S')"
 					notify_send "$message"
 
@@ -685,15 +684,15 @@ monitor_ssh() {
 				user=$(sed -nE 's/.* for ([^ ]+) from .*/\1/p' <<<"$line")
 				ip="$(extract_ssh_client_ip "$line")"
 				if [ -n "$user" ]; then
-					local message=" ✅ УСПЕШНОЕ SSH ПОДКЛЮЧЕНИЕ %0A"
-					message="${message}👤 Пользователь: ${user}%0A"
-					message="${message}🌐 IP адрес: ${ip:-local}%0A"
+					local message=" ✅ УСПЕШНОЕ SSH ПОДКЛЮЧЕНИЕ "$'\n'
+					message="${message}👤 Пользователь: ${user}"$'\n'
+					message="${message}🌐 IP адрес: ${ip:-local}"$'\n'
 					message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
 					notify_send "$message"
 					write_log "SSH успешный вход: $user с IP ${ip:-local}"
 					if [ "$user" = "root" ]; then
-						local rmsg=" 🔑 SSH ВХОД ПОД ROOT %0A"
-						rmsg="${rmsg}🌐 IP: ${ip:-local}%0A"
+						local rmsg=" 🔑 SSH ВХОД ПОД ROOT "$'\n'
+						rmsg="${rmsg}🌐 IP: ${ip:-local}"$'\n'
 						rmsg="${rmsg}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
 						notify_send "$rmsg"
 					fi
@@ -719,10 +718,10 @@ monitor_ssh() {
 							unset "FAIL_COUNTS[$ip]"
 						else
 							if [ "$current_attempts" -ge 2 ]; then
-								local message=" ❌ НЕУДАЧНАЯ ПОПЫТКА SSH %0A"
-								message="${message}👤 Пользователь: ${user}%0A"
-								message="${message}🌐 IP адрес: ${ip}%0A"
-								message="${message}📊 Попытка ${current_attempts} из ${MAX_ATTEMPTS}%0A"
+								local message=" ❌ НЕУДАЧНАЯ ПОПЫТКА SSH "$'\n'
+								message="${message}👤 Пользователь: ${user}"$'\n'
+								message="${message}🌐 IP адрес: ${ip}"$'\n'
+								message="${message}📊 Попытка ${current_attempts} из ${MAX_ATTEMPTS}"$'\n'
 								message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
 								notify_send "$message"
 							fi
@@ -768,10 +767,10 @@ monitor_sudo() {
 				pwd=$(sed -nE 's/.*PWD=([^ ]+).*/\1/p' <<<"$line")
 
 				if [ -n "$user" ] && [ -n "${sudo_cmd:-}" ]; then
-					local message=" ⚠️ ИСПОЛЬЗОВАНИЕ SUDO %0A"
-					message="${message}👤 Пользователь: ${user}%0A"
-					message="${message}💻 Команда: ${sudo_cmd}%0A"
-					message="${message}📁 Директория: ${pwd:-unknown}%0A"
+					local message=" ⚠️ ИСПОЛЬЗОВАНИЕ SUDO "$'\n'
+					message="${message}👤 Пользователь: ${user}"$'\n'
+					message="${message}💻 Команда: ${sudo_cmd}"$'\n'
+					message="${message}📁 Директория: ${pwd:-unknown}"$'\n'
 					message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
 					notify_send "$message"
 					write_log "SUDO: $user выполнил $sudo_cmd"
@@ -812,8 +811,8 @@ monitor_security_events() {
 		if echo "$chunk" | grep -Eqi "REMOTE HOST IDENTIFICATION HAS CHANGED"; then
 			local hk
 			hk="$(echo "$chunk" | grep -Ei "REMOTE HOST IDENTIFICATION HAS CHANGED" | head -n 3)"
-			local m=" 🔐 ВНИМАНИЕ: изменение SSH host key / MITM? %0A"
-			m="${m}$(printf '%s' "$hk" | sed 's/$/%0A/g' | tr -d '\n')%0A"
+			local m=" 🔐 ВНИМАНИЕ: изменение SSH host key / MITM? "$'\n'
+			m="${m}$(printf '%s\n' "$hk")"
 			m="${m}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
 			notify_send "$m"
 			write_log "SECURITY: обнаружено сообщение об изменении host key"
@@ -832,9 +831,9 @@ monitor_security_events() {
 					lastn="${BRUTE_LAST_NOTIFY[$ip]:-0}"
 					if [ $((nowc - lastn)) -ge "$BRUTE_NOTIFY_COOLDOWN_SEC" ]; then
 						BRUTE_LAST_NOTIFY[$ip]=$nowc
-						local bm=" 🧨 ВОЗМОЖНЫЙ МАССОВЫЙ БРУТФОРС SSH %0A"
-						bm="${bm}🌐 IP: ${ip}%0A"
-						bm="${bm}📊 Неудачных попыток за ~${BRUTE_WINDOW_SEC}s: ${count}%0A"
+						local bm=" 🧨 ВОЗМОЖНЫЙ МАССОВЫЙ БРУТФОРС SSH "$'\n'
+						bm="${bm}🌐 IP: ${ip}"$'\n'
+						bm="${bm}📊 Неудачных попыток за ~${BRUTE_WINDOW_SEC}s: ${count}"$'\n'
 						bm="${bm}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
 						notify_send "$bm"
 						write_log "SECURITY: массовый брутфорс? IP=$ip fails=${count} за окно ${BRUTE_WINDOW_SEC}s"
@@ -918,29 +917,29 @@ send_daily_report() {
 		done <"$BAN_LIST_FILE"
 	fi
 
-	local message=" 📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ SSH МОНИТОРИНГА %0A"
-	message="${message}🖥️ Сервер: $(hostname)%0A"
-	message="${message}🕐 Время отчета: ${current_time}%0A"
-	message="${message}%0A"
-	message="${message} 📈 СТАТИСТИКА ЗА ПОСЛЕДНИЕ 24 ЧАСА: %0A"
-	message="${message} ✅ Успешных SSH подключений: ${successful_logins:-0}%0A"
-	message="${message} ❌ Неудачных попыток SSH: ${failed_logins:-0}%0A"
-	message="${message} ⚠️ Команд через sudo: ${sudo_commands:-0}%0A"
-	message="${message} 🚫 Заблокировано IP: ${active_bans}%0A"
-	message="${message}%0A"
-	message="${message} 🧾 ТОП-${DAILY_REPORT_TOP_IPS} IP ПО НЕУДАЧНЫМ ПОПЫТКАМ:%0A"
+	local message=" 📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ SSH МОНИТОРИНГА "$'\n'
+	message="${message}🖥️ Сервер: $(hostname)"$'\n'
+	message="${message}🕐 Время отчета: ${current_time}"$'\n'
+	message="${message}"$'\n'
+	message="${message} 📈 СТАТИСТИКА ЗА ПОСЛЕДНИЕ 24 ЧАСА: "$'\n'
+	message="${message} ✅ Успешных SSH подключений: ${successful_logins:-0}"$'\n'
+	message="${message} ❌ Неудачных попыток SSH: ${failed_logins:-0}"$'\n'
+	message="${message} ⚠️ Команд через sudo: ${sudo_commands:-0}"$'\n'
+	message="${message} 🚫 Заблокировано IP: ${active_bans}"$'\n'
+	message="${message}"$'\n'
+	message="${message} 🧾 ТОП-${DAILY_REPORT_TOP_IPS} IP ПО НЕУДАЧНЫМ ПОПЫТКАМ:"$'\n'
 	if [ -n "$top_lines" ]; then
-		message="${message}$(printf '%s' "$top_lines" | sed 's/$/%0A/g' | tr -d '\n')%0A"
+		message="${message}${top_lines}"$'\n'
 	else
-		message="${message} (нет данных)%0A"
+		message="${message} (нет данных)"$'\n'
 	fi
-	message="${message}%0A"
-	message="${message} 👥 АКТИВНЫЕ ПОЛЬЗОВАТЕЛИ (${active_count}): %0A"
+	message="${message}"$'\n'
+	message="${message} 👥 АКТИВНЫЕ ПОЛЬЗОВАТЕЛИ (${active_count}):"$'\n'
 
 	if [ -n "$active_sessions" ]; then
-		message="${message}$(printf '%s' "$active_sessions" | sed 's/$/%0A/g' | tr -d '\n')%0A"
+		message="${message}${active_sessions}"$'\n'
 	else
-		message="${message} Нет активных пользователей%0A"
+		message="${message} Нет активных пользователей"$'\n'
 	fi
 
 	notify_send "$message"
@@ -998,8 +997,8 @@ send_heartbeat() {
 	local timestamp_human
 	timestamp_human=$(date '+%d.%m.%Y %H:%M:%S')
 
-	local message=" ❤️ Heartbeat - скрипт мониторинга работает %0A"
-	message="${message}🖥️ Сервер: $(hostname)%0A"
+	local message=" ❤️ Heartbeat - скрипт мониторинга работает "$'\n'
+	message="${message}🖥️ Сервер: $(hostname)"$'\n'
 	message="${message}🕐 Время: ${timestamp_human}"
 
 	notify_send "$message"
@@ -1056,12 +1055,12 @@ send_startup_notification() {
 	timestamp=$(date '+%d.%m.%Y %H:%M:%S')
 	local whitelist_count=$((${#WHITELIST_IPS[@]} + ${#WHITELIST_SUBNETS[@]}))
 
-	local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН %0A"
-	message="${message}🖥️ Сервер: $(hostname)%0A"
-	message="${message}🕐 Время запуска: ${timestamp}%0A"
-	message="${message}📊 Мониторинг SSH и SUDO активирован%0A"
-	message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд%0A"
-	message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей%0A"
+	local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН "$'\n'
+	message="${message}🖥️ Сервер: $(hostname)"$'\n'
+	message="${message}🕐 Время запуска: ${timestamp}"$'\n'
+	message="${message}📊 Мониторинг SSH и SUDO активирован"$'\n'
+	message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд"$'\n'
+	message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей"$'\n'
 	message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"
 
 	notify_send "$message"
@@ -1071,8 +1070,8 @@ send_startup_notification() {
 send_shutdown_notification() {
 	local timestamp
 	timestamp=$(date '+%d.%m.%Y %H:%M:%S')
-	local message=" ⚠️ СКРИПТ МОНИТОРИНГА ОСТАНОВЛЕН %0A"
-	message="${message}🖥️ Сервер: $(hostname)%0A"
+	local message=" ⚠️ СКРИПТ МОНИТОРИНГА ОСТАНОВЛЕН "$'\n'
+	message="${message}🖥️ Сервер: $(hostname)"$'\n'
 	message="${message}🕐 Время остановки: ${timestamp}"
 
 	notify_send "$message"
