@@ -55,6 +55,8 @@ declare -A BRUTE_LAST_NOTIFY
 
 CHECK_CONFIG_ONLY=0
 DRY_RUN=0
+# Защита от двойного вызова: при SIGTERM срабатывает trap TERM, затем при выходе — trap EXIT
+SHUTDOWN_NOTIFIED=0
 
 trim_value() {
 	local value="$1"
@@ -1068,6 +1070,9 @@ send_startup_notification() {
 }
 
 send_shutdown_notification() {
+	[ "${SHUTDOWN_NOTIFIED:-0}" = "1" ] && return 0
+	SHUTDOWN_NOTIFIED=1
+
 	local timestamp
 	timestamp=$(date '+%d.%m.%Y %H:%M:%S')
 	local message=" ⚠️ СКРИПТ МОНИТОРИНГА ОСТАНОВЛЕН "$'\n'
