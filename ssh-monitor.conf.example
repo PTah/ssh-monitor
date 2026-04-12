@@ -13,6 +13,8 @@ LAST_SECURITY_EVENTS_FILE="/var/log/last_security_events_check"
 BAN_LIST_FILE="/var/log/ssh_bans.txt"
 
 DAILY_REPORT_HOUR="9"
+# IANA-зона для «9:00» и календарной даты отчёта; пусто = как у команды date (обычно локаль сервера, см. timedatectl)
+DAILY_REPORT_TZ=""
 DAILY_REPORT_TOP_IPS="5"
 
 BAN_TIME="3600"

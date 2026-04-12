@@ -18,6 +18,9 @@ LAST_HEARTBEAT_FILE="/var/log/last_heartbeat.txt"
 LAST_REPORT_FILE="/var/log/last_daily_report.txt"
 DAILY_REPORT_HOUR=9
 DAILY_REPORT_TOP_IPS=5
+# Пусто = календарь и час отчёта в зоне процесса (как `date`, обычно совпадает с /etc/localtime).
+# Иначе IANA, например Europe/Moscow — явная зона для DAILY_REPORT_HOUR и даты «сегодня» в отчёте.
+DAILY_REPORT_TZ=""
 
 # Временные файлы для отслеживания уже обработанных событий
 LAST_SSH_CHECK_FILE="/var/log/last_ssh_check"
@@ -118,6 +121,7 @@ load_config() {
 	local cfg_last_report_file="${LAST_REPORT_FILE}"
 	local cfg_daily_report_hour="${DAILY_REPORT_HOUR}"
 	local cfg_daily_report_top_ips="${DAILY_REPORT_TOP_IPS}"
+	local cfg_daily_report_tz="${DAILY_REPORT_TZ}"
 	local cfg_last_ssh_check_file="${LAST_SSH_CHECK_FILE}"
 	local cfg_last_sudo_check_file="${LAST_SUDO_CHECK_FILE}"
 	local cfg_last_security_events_file="${LAST_SECURITY_EVENTS_FILE}"
@@ -156,6 +160,7 @@ load_config() {
 
 	DAILY_REPORT_HOUR="${DAILY_REPORT_HOUR:-$cfg_daily_report_hour}"
 	DAILY_REPORT_TOP_IPS="${DAILY_REPORT_TOP_IPS:-$cfg_daily_report_top_ips}"
+	DAILY_REPORT_TZ="$(trim_value "${DAILY_REPORT_TZ:-$cfg_daily_report_tz}")"
 	BRUTE_WINDOW_SEC="${BRUTE_WINDOW_SEC:-$cfg_brute_window_sec}"
 	BRUTE_MIN_FAILS="${BRUTE_MIN_FAILS:-$cfg_brute_min_fails}"
 	BRUTE_NOTIFY_COOLDOWN_SEC="${BRUTE_NOTIFY_COOLDOWN_SEC:-$cfg_brute_notify_cooldown_sec}"
@@ -168,6 +173,15 @@ load_config() {
 	local whitelist_subnets_csv="${WHITELIST_SUBNETS:-$cfg_whitelist_subnets_csv}"
 	csv_to_array "$whitelist_ips_csv" WHITELIST_IPS
 	csv_to_array "$whitelist_subnets_csv" WHITELIST_SUBNETS
+}
+
+# Дата/время для ежедневного отчёта (час DAILY_REPORT_HOUR и «сегодня» в LAST_REPORT_FILE).
+report_date() {
+	if [ -n "${DAILY_REPORT_TZ:-}" ]; then
+		TZ="$DAILY_REPORT_TZ" date "$@"
+	else
+		date "$@"
+	fi
 }
 
 validate_config() {
@@ -950,7 +964,7 @@ top_failed_ips_journal_24h() {
 
 send_daily_report() {
 	local current_time
-	current_time=$(date '+%d.%m.%Y %H:%M:%S')
+	current_time=$(report_date '+%d.%m.%Y %H:%M:%S')
 
 	local successful_logins failed_logins sudo_commands
 	local top_lines=""
@@ -1013,7 +1027,7 @@ send_daily_report() {
 	notify_send "$message"
 	write_log "Ежедневный отчет отправлен"
 
-	echo "$(date '+%F')" >"$LAST_REPORT_FILE"
+	echo "$(report_date '+%F')" >"$LAST_REPORT_FILE"
 }
 
 read_last_report_date() {
@@ -1028,7 +1042,7 @@ read_last_report_date() {
 		return
 	fi
 	if [[ "$raw" =~ ^[0-9]+$ ]]; then
-		date -d "@$raw" '+%F' 2>/dev/null || echo ""
+		report_date -d "@$raw" '+%F' 2>/dev/null || echo ""
 		return
 	fi
 	echo ""
@@ -1036,7 +1050,7 @@ read_last_report_date() {
 
 check_daily_report() {
 	local today
-	today=$(date '+%F')
+	today=$(report_date '+%F')
 	local last_date
 	last_date="$(read_last_report_date)"
 
@@ -1045,8 +1059,8 @@ check_daily_report() {
 	fi
 
 	local cur_h cur_m cur_mins rep_mins
-	cur_h=$(date '+%-H')
-	cur_m=$(date '+%-M')
+	cur_h=$(report_date '+%-H')
+	cur_m=$(report_date '+%-M')
 	cur_mins=$((10#$cur_h * 60 + 10#$cur_m))
 	rep_mins=$((10#$DAILY_REPORT_HOUR * 60 + 0))
 
@@ -1189,6 +1203,7 @@ run_check_config() {
 	printf 'BACKUP_WEBHOOK_URL: %s\n' "$([ -n "${BACKUP_WEBHOOK_URL:-}" ] && echo настроен || echo не задан)"
 	printf 'LOG_FILE=%s\n' "$LOG_FILE"
 	printf 'DAILY_REPORT_HOUR=%s\n' "$DAILY_REPORT_HOUR"
+	printf 'DAILY_REPORT_TZ=%s (пусто = зона процесса/date)\n' "${DAILY_REPORT_TZ:-}"
 	printf 'DAILY_REPORT_TOP_IPS=%s\n' "$DAILY_REPORT_TOP_IPS"
 	printf 'BRUTE_WINDOW_SEC=%s BRUTE_MIN_FAILS=%s\n' "$BRUTE_WINDOW_SEC" "$BRUTE_MIN_FAILS"
 	printf 'PROMETHEUS_TEXTFILE_DIR=%s\n' "${PROMETHEUS_TEXTFILE_DIR:-}"

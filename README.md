@@ -19,7 +19,7 @@ Bash-скрипт мониторинга SSH/SUDO с уведомлениями 
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 - `BACKUP_WEBHOOK_URL` — резервная доставка JSON `{"text":"..."}` (например Slack Incoming Webhook), если Telegram недоступен или вернул ошибку
 - `LOG_FILE`, `LAST_HEARTBEAT_FILE`, `LAST_REPORT_FILE`, `LAST_SSH_CHECK_FILE`, `LAST_SUDO_CHECK_FILE`, `LAST_SECURITY_EVENTS_FILE`, `BAN_LIST_FILE`
-- `DAILY_REPORT_HOUR` (0..23), `DAILY_REPORT_TOP_IPS`
+- `DAILY_REPORT_HOUR` (0..23), `DAILY_REPORT_TZ` (опционально), `DAILY_REPORT_TOP_IPS`
 - `BRUTE_WINDOW_SEC`, `BRUTE_MIN_FAILS`, `BRUTE_NOTIFY_COOLDOWN_SEC`
 - `PROMETHEUS_TEXTFILE_DIR` — каталог для `ssh_monitor.prom` (совместимость с node_exporter textfile collector)
 - `HEALTHCHECK_STATUS_FILE` — путь к JSON-файлу с меткой последней итерации цикла
@@ -41,7 +41,8 @@ Bash-скрипт мониторинга SSH/SUDO с уведомлениями 
 - `LAST_SUDO_CHECK_FILE` — файл с меткой времени последней проверки sudo-событий.
 - `LAST_SECURITY_EVENTS_FILE` — метка последней проверки «тяжёлых» событий безопасности в журнале.
 - `BAN_LIST_FILE` — файл состояния банов (IP, время окончания бана и метаданные).
-- `DAILY_REPORT_HOUR` — локальный час (0..23), после наступления которого в текущих сутках отправляется не более одного ежедневного отчёта.
+- `DAILY_REPORT_HOUR` — час (0..23), после наступления которого в **текущих календарных сутках** (в выбранной ниже зоне) отправляется не более одного ежедневного отчёта.
+- `DAILY_REPORT_TZ` — необязательная **IANA**-зона (`Europe/Moscow`, `Asia/Yekaterinburg`, …). Если **пусто**, для отчёта используется та же зона, что и у команды `date` у процесса монитора (как правило, совпадает с `timedatectl` / `/etc/localtime` на сервере). Если сервис запускается с `TZ=UTC` в unit-файле, без `DAILY_REPORT_TZ` отчёт ориентируется на **UTC** — тогда задайте явную зону в конфиге.
 - `DAILY_REPORT_TOP_IPS` — сколько IP показывать в топе неудачных попыток за 24 часа.
 - `BRUTE_WINDOW_SEC` — окно (секунды) для оценки «массового» брутфорса по `journalctl`.
 - `BRUTE_MIN_FAILS` — минимум неудачных попыток за окно для тревоги.
