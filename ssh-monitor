@@ -742,41 +742,106 @@ monitor_ssh() {
 # Мониторинг sudo
 # ============================================
 
+# Строка успешного sudo с перечислением окружения (TTY, PWD, USER, COMMAND).
+# В journal идентификатор часто НЕ равен "sudo", поэтому не используем только journalctl -t sudo.
+is_sudo_command_audit_line() {
+	[[ "$1" == *COMMAND=* ]] || return 1
+	grep -Eq 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' <<<"$1" 2>/dev/null || \
+		grep -Eq 'sudo:[[:space:]].*COMMAND=' <<<"$1" 2>/dev/null
+}
+
+parse_sudo_audit_line() {
+	local line="$1"
+	local -n out_user="$2"
+	local -n out_cmd="$3"
+	local -n out_pwd="$4"
+	local -n out_runuser="$5"
+
+	out_user=""
+	out_cmd=""
+	out_pwd=""
+	out_runuser=""
+
+	if [[ "$line" =~ sudo\[[0-9]+\]:[[:space:]]([^[:space:]]+)[[:space:]]+:[[:space:]] ]]; then
+		out_user="${BASH_REMATCH[1]}"
+	elif [[ "$line" =~ sudo:[[:space:]]([^[:space:]]+)[[:space:]]+:[[:space:]] ]]; then
+		out_user="${BASH_REMATCH[1]}"
+	fi
+
+	if [[ "$line" =~ USER=([^[:space:];]+) ]]; then
+		out_runuser="${BASH_REMATCH[1]}"
+	fi
+
+	if [[ "$line" =~ PWD=([^;]+) ]]; then
+		out_pwd="${BASH_REMATCH[1]}"
+		out_pwd="${out_pwd%"${out_pwd##*[![:space:]]}"}"
+	fi
+
+	if [[ "$line" =~ COMMAND=(.*) ]]; then
+		out_cmd="${BASH_REMATCH[1]}"
+		out_cmd="${out_cmd%"${out_cmd##*[![:space:]]}"}"
+	fi
+}
+
 monitor_sudo() {
 	local last_check="0"
 	if [ -f "$LAST_SUDO_CHECK_FILE" ]; then
 		last_check="$(<"$LAST_SUDO_CHECK_FILE")"
 	fi
+	if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
+		last_check=0
+	fi
 	local current_time
 	current_time=$(date '+%s')
 
+	local since_journal
+	if [ "$last_check" -eq 0 ]; then
+		since_journal="--since=-30m"
+	else
+		since_journal="--since=@${last_check}"
+	fi
+
 	local sudo_logs=""
 	if command -v journalctl >/dev/null 2>&1; then
-		sudo_logs=$(journalctl -t sudo --since="@${last_check}" --until="now" 2>/dev/null || true)
+		sudo_logs=$(journalctl $since_journal --until="now" --no-pager 2>/dev/null \
+			| grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' || true)
 	elif [ -f /var/log/auth.log ]; then
-		sudo_logs=$(tail -n 8000 /var/log/auth.log 2>/dev/null | grep -E "sudo.*COMMAND" 2>/dev/null || true)
+		sudo_logs=$(grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' /var/log/auth.log 2>/dev/null | tail -n 400 || true)
+	elif [ -f /var/log/secure ]; then
+		sudo_logs=$(grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' /var/log/secure 2>/dev/null | tail -n 400 || true)
 	else
 		sudo_logs=""
 	fi
 
+	declare -A SUDO_DEDUP_BATCH
 	if [ -n "$sudo_logs" ]; then
 		while IFS= read -r line; do
 			[[ -z "$line" ]] && continue
-			if echo "$line" | grep -q "COMMAND"; then
-				local user sudo_cmd pwd
-				user=$(sed -nE 's/.*sudo: ([^ :]+).*/\1/p' <<<"$line")
-				sudo_cmd=$(sed -nE 's/.*COMMAND=([^ ]+).*/\1/p' <<<"$line")
-				pwd=$(sed -nE 's/.*PWD=([^ ]+).*/\1/p' <<<"$line")
+			is_sudo_command_audit_line "$line" || continue
 
-				if [ -n "$user" ] && [ -n "${sudo_cmd:-}" ]; then
-					local message=" ⚠️ ИСПОЛЬЗОВАНИЕ SUDO "$'\n'
-					message="${message}👤 Пользователь: ${user}"$'\n'
-					message="${message}💻 Команда: ${sudo_cmd}"$'\n'
-					message="${message}📁 Директория: ${pwd:-unknown}"$'\n'
-					message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
-					notify_send "$message"
-					write_log "SUDO: $user выполнил $sudo_cmd"
+			local fp=""
+			if command -v sha256sum >/dev/null 2>&1; then
+				fp=$(printf '%s' "$line" | sha256sum | awk '{print $1}')
+			else
+				fp=$(printf '%s' "$line" | cksum | awk '{print $1}')
+			fi
+			[[ -n "$fp" && -n "${SUDO_DEDUP_BATCH[$fp]:-}" ]] && continue
+			[[ -n "$fp" ]] && SUDO_DEDUP_BATCH[$fp]=1
+
+			local user sudo_cmd pwd run_as
+			parse_sudo_audit_line "$line" user sudo_cmd pwd run_as
+
+			if [ -n "$user" ] && [ -n "${sudo_cmd:-}" ]; then
+				local message=" ⚠️ ИСПОЛЬЗОВАНИЕ SUDO "$'\n'
+				message="${message}👤 Пользователь: ${user}"$'\n'
+				if [ -n "$run_as" ]; then
+					message="${message}🔑 От имени USER: ${run_as}"$'\n'
 				fi
+				message="${message}💻 Команда: ${sudo_cmd}"$'\n'
+				message="${message}📁 Директория: ${pwd:-unknown}"$'\n'
+				message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+				notify_send "$message"
+				write_log "SUDO: $user выполнил $sudo_cmd${run_as:+ (USER=$run_as)}"
 			fi
 		done <<<"$sudo_logs"
 	fi
@@ -866,7 +931,8 @@ journal_count_since_24h() {
 journal_sudo_count_24h() {
 	local c
 	if command -v journalctl >/dev/null 2>&1; then
-		c=$(journalctl -t sudo --since="24 hours ago" 2>/dev/null | grep -F -c "COMMAND" || true)
+		c=$(journalctl --since="24 hours ago" --no-pager 2>/dev/null \
+			| grep -E -- 'sudo(\[[0-9]+\])?:[[:space:]].*COMMAND=' | wc -l | tr -d ' ' || true)
 		echo "${c:-0}"
 	else
 		echo "0"
