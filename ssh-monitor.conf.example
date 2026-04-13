@@ -2,14 +2,26 @@ TELEGRAM_BOT_TOKEN="replace_with_telegram_bot_token"
 TELEGRAM_CHAT_ID="replace_with_telegram_chat_id"
 
 # Резервный webhook, если все каналы из NOTIFY_CHAIN недоступны (JSON {"text":"..."}).
+# ВАЖНО: BACKUP_WEBHOOK_URL НЕ заменяет основной канал — без хотя бы одного из telegram/zabbix/email
+# скрипт сразу завершится с ошибкой в stderr: «Не настроен ни один канал отправки оповещений» (код 1),
+# в том числе при --check-config и --dry-run. Сначала настройте Telegram, Zabbix или SMTP ниже.
 BACKUP_WEBHOOK_URL=""
 
-# Очередь оповещений: CSV из telegram, zabbix, email (или tg, zbx, mail).
-# Пусто = авто: в цепочку попадают только настроенные каналы, порядок telegram → zabbix → email.
-# Пример явной очереди: NOTIFY_ORDER="telegram,zabbix,email"
-# Только Telegram: NOTIFY_ORDER="telegram"
-# Только Zabbix: NOTIFY_ORDER="zabbix"
-# Только почта: NOTIFY_ORDER="email"
+# --- Очередь оповещений (NOTIFY_ORDER) ---
+# CSV: telegram, zabbix, email (или сокращения tg, zbx, mail).
+#
+# Пустая строка NOTIFY_ORDER="" = авто: в цепочку NOTIFY_CHAIN попадают ТОЛЬКО реально настроенные каналы,
+# порядок по умолчанию: telegram → zabbix → email (см. критерии «настроен» в README, раздел про каналы).
+#
+# Если после сборки цепочки каналов список ПУСТ (ни один канал не настроен, либо в NOTIFY_ORDER только
+# неизвестные токены), скрипт НЕ запускает мониторинг и выходит с ошибкой:
+#   Не настроен ни один канал отправки оповещений
+#
+# Примеры явной очереди:
+# NOTIFY_ORDER="telegram,zabbix,email"
+# NOTIFY_ORDER="telegram"
+# NOTIFY_ORDER="zabbix"
+# NOTIFY_ORDER="email"
 NOTIFY_ORDER=""
 
 # Zabbix trapper (zabbix_sender). Нужны ZABBIX_SERVER и ZABBIX_HOST_NAME.
