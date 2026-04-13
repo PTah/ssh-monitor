@@ -18,7 +18,7 @@ ENABLE_LOGIND_MONITOR="1"
 LOGIND_NOTIFY_NEW="1"
 LOGIND_NOTIFY_REMOVED="0"
 LOGIND_NOTIFY_FAILED="1"
-# 1 = не дублировать Telegram для новых сессий с типом ssh (уведомление уже есть из SSH-монитора)
+# 1 = не дублировать Telegram для SSH-сессий (Type=ssh или Service=*sshd*, см. README)
 LOGIND_SKIP_REMOTE="1"
 
 DAILY_REPORT_HOUR="9"

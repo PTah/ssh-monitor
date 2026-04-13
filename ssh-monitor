@@ -33,7 +33,7 @@ ENABLE_LOGIND_MONITOR=1
 LOGIND_NOTIFY_NEW=1
 LOGIND_NOTIFY_REMOVED=0
 LOGIND_NOTIFY_FAILED=1
-# 1 = не слать Telegram для новых сессий с типом ssh (уведомление уже идёт из monitor_ssh)
+# 1 = не слать дубль Telegram для SSH (Type=ssh или Service=*sshd*; см. logind_session_is_ssh_duplicate_for_notify)
 LOGIND_SKIP_REMOTE=1
 
 # Эксплуатация / health
@@ -979,6 +979,35 @@ logind_session_type() {
  loginctl show-session "$sid" -p Type 2>/dev/null | sed -n 's/^Type=//p' | tr -d '[:space:]'
 }
 
+# Не слать второе Telegram при LOGIND_SKIP_REMOTE: сессия уже покрыта monitor_ssh.
+# Часто Type=ssh; на многих дистрибутивах SSH — это Type=tty + Service=sshd (или путь к sshd).
+# Пустой ответ loginctl на первом запросе возможен из-за гонки с journal — несколько коротких повторов.
+logind_session_is_ssh_duplicate_for_notify() {
+ local sid="$1"
+ [ -z "$sid" ] && return 1
+ if ! command -v loginctl >/dev/null 2>&1; then
+ return 1
+ fi
+ local attempt st svc svc_lc
+ for attempt in 1 2 3 4 5; do
+ local props
+ props=$(loginctl show-session "$sid" -p Type -p Service 2>/dev/null || true)
+ st=$(printf '%s\n' "$props" | sed -n 's/^Type=//p' | head -n1 | tr -d '[:space:]')
+ svc=$(printf '%s\n' "$props" | sed -n 's/^Service=//p' | head -n1 | tr -d '[:space:]')
+ svc_lc=$(printf '%s' "$svc" | tr '[:upper:]' '[:lower:]')
+ if [ "$st" = "ssh" ] || [[ "$svc_lc" == *sshd* ]]; then
+ return 0
+ fi
+ if [ -n "$st" ] || [ -n "$svc" ]; then
+ return 1
+ fi
+ if [ "$attempt" -lt 5 ]; then
+ sleep 0.2
+ fi
+ done
+ return 1
+}
+
 parse_logind_new_session() {
  local line="$1"
  local -n out_sid="$2"
@@ -1030,10 +1059,8 @@ monitor_logind() {
  local sid="" user=""
  if parse_logind_new_session "$line" sid user; then
  if [ "${LOGIND_SKIP_REMOTE:-1}" = "1" ] && [ -n "$sid" ]; then
- local st
- st=$(logind_session_type "$sid")
- if [ "$st" = "ssh" ]; then
- write_log "LOGIND: новая сессия (тип ssh, уведомление от ssh-monitor): ${line}"
+ if logind_session_is_ssh_duplicate_for_notify "$sid"; then
+ write_log "LOGIND: новая сессия (SSH уже в monitor_ssh, Telegram пропущен): ${line}"
  continue
  fi
  fi
