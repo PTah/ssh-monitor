@@ -1,8 +1,32 @@
 TELEGRAM_BOT_TOKEN="replace_with_telegram_bot_token"
 TELEGRAM_CHAT_ID="replace_with_telegram_chat_id"
 
-# Резервный webhook при недоступности Telegram (JSON {"text":"..."}, совместимо со Slack Incoming Webhook)
+# Резервный webhook, если все каналы из NOTIFY_CHAIN недоступны (JSON {"text":"..."}).
 BACKUP_WEBHOOK_URL=""
+
+# Очередь оповещений: CSV из telegram, zabbix, email (или tg, zbx, mail).
+# Пусто = авто: в цепочку попадают только настроенные каналы, порядок telegram → zabbix → email.
+# Пример явной очереди: NOTIFY_ORDER="telegram,zabbix,email"
+# Только Telegram: NOTIFY_ORDER="telegram"
+# Только Zabbix: NOTIFY_ORDER="zabbix"
+# Только почта: NOTIFY_ORDER="email"
+NOTIFY_ORDER=""
+
+# Zabbix trapper (zabbix_sender). Нужны ZABBIX_SERVER и ZABBIX_HOST_NAME.
+ZABBIX_SERVER=""
+ZABBIX_HOST_NAME=""
+ZABBIX_ALERT_KEY="ssh.monitor.alert"
+ZABBIX_SEQ_KEY="ssh.monitor.seq"
+
+# SMTP (python3). Для авто-режима почты нужны MAIL_SMTP_HOST, MAIL_FROM, MAIL_TO.
+MAIL_SMTP_HOST=""
+MAIL_SMTP_PORT="587"
+MAIL_SMTP_USER=""
+MAIL_SMTP_PASSWORD=""
+MAIL_FROM=""
+MAIL_TO=""
+MAIL_SMTP_STARTTLS="1"
+MAIL_SMTP_SSL="0"
 
 LOG_FILE="/var/log/ssh_monitor.log"
 LAST_HEARTBEAT_FILE="/var/log/last_heartbeat.txt"
@@ -18,7 +42,7 @@ ENABLE_LOGIND_MONITOR="1"
 LOGIND_NOTIFY_NEW="1"
 LOGIND_NOTIFY_REMOVED="0"
 LOGIND_NOTIFY_FAILED="1"
-# 1 = не дублировать Telegram для SSH-сессий (Type=ssh или Service=*sshd*, см. README)
+# 1 = не дублировать Telegram для новых сессий с типом ssh (уведомление уже есть из SSH-монитора)
 LOGIND_SKIP_REMOTE="1"
 
 DAILY_REPORT_HOUR="9"

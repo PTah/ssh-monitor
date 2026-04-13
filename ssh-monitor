@@ -6,15 +6,32 @@ IFS=$'\n\t'
 # КОНФИГУРАЦИЯ
 # ============================================
 
-# Семантическая версия (линия 0.9.x). Сейчас: 0.9.0 — далее patch 0.9.1, 0.9.2 …; затем при необходимости 0.10.0 или сразу 1.0.0.
-# При запуске из git-репозитория к строке добавляется +<короткий sha> и при грязном дереве суффикс -dirty (см. ssh_monitor_version_display).
-SSH_MONITOR_VERSION="0.9.0"
-
 CONFIG_FILE="/etc/ssh-monitor.conf"
+SSH_MONITOR_VERSION="0.9.5"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
 BACKUP_WEBHOOK_URL=""
+
+# Очередь оповещений: CSV из имён telegram, zabbix, email (или tg, zbx, mail).
+# Пусто = авто: только настроенные каналы, порядок telegram → zabbix → email.
+NOTIFY_ORDER=""
+
+# Zabbix trapper (zabbix_sender). Пустой ZABBIX_SERVER — канал недоступен.
+ZABBIX_SERVER=""
+ZABBIX_HOST_NAME=""
+ZABBIX_ALERT_KEY="ssh.monitor.alert"
+ZABBIX_SEQ_KEY="ssh.monitor.seq"
+
+# Почта (SMTP через python3). Нужны MAIL_SMTP_HOST, MAIL_FROM, MAIL_TO.
+MAIL_SMTP_HOST=""
+MAIL_SMTP_PORT="587"
+MAIL_SMTP_USER=""
+MAIL_SMTP_PASSWORD=""
+MAIL_FROM=""
+MAIL_TO=""
+MAIL_SMTP_STARTTLS="1"
+MAIL_SMTP_SSL="0"
 
 # Конфигурация логов
 LOG_FILE="/var/log/ssh_monitor.log"
@@ -37,7 +54,7 @@ ENABLE_LOGIND_MONITOR=1
 LOGIND_NOTIFY_NEW=1
 LOGIND_NOTIFY_REMOVED=0
 LOGIND_NOTIFY_FAILED=1
-# 1 = не слать дубль Telegram для SSH (Type=ssh или Service=*sshd*; см. logind_session_is_ssh_duplicate_for_notify)
+# 1 = не слать Telegram для новых сессий с типом ssh (уведомление уже идёт из monitor_ssh)
 LOGIND_SKIP_REMOTE=1
 
 # Эксплуатация / health
@@ -70,35 +87,11 @@ declare -A FAIL_COUNTS
 declare -A BRUTE_LAST_NOTIFY
 
 CHECK_CONFIG_ONLY=0
-SHOW_VERSION=0
 DRY_RUN=0
 # Защита от двойного вызова: при SIGTERM срабатывает trap TERM, затем при выходе — trap EXIT
 SHUTDOWN_NOTIFIED=0
-
-# Полная строка версии для логов, --version и Telegram (без загрузки конфига).
-ssh_monitor_version_display() {
- local ver base_dir rev
- ver="${SSH_MONITOR_VERSION:-0.9.0}"
- base_dir=""
- if [ -n "${BASH_SOURCE[0]:-}" ]; then
- base_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || base_dir=""
- fi
- if [ -z "$base_dir" ]; then
- base_dir="$(cd "$(dirname "$0")" && pwd 2>/dev/null)" || base_dir=""
- fi
- if [ -n "$base_dir" ] && command -v git >/dev/null 2>&1; then
- if git -C "$base_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
- rev=$(git -C "$base_dir" rev-parse --short HEAD 2>/dev/null || true)
- if [ -n "$rev" ]; then
- ver="${ver}+${rev}"
- if ! git -C "$base_dir" diff --quiet 2>/dev/null; then
- ver="${ver}-dirty"
- fi
- fi
- fi
- fi
- printf '%s' "$ver"
-}
+ZABBIX_EVENT_SEQ=0
+declare -a NOTIFY_CHAIN=()
 
 trim_value() {
  local value="$1"
@@ -155,6 +148,10 @@ load_config() {
  local cfg_telegram_bot_token="${TELEGRAM_BOT_TOKEN}"
  local cfg_telegram_chat_id="${TELEGRAM_CHAT_ID}"
  local cfg_backup_webhook_url="${BACKUP_WEBHOOK_URL}"
+ local cfg_zabbix_server="${ZABBIX_SERVER:-}"
+ local cfg_zabbix_host_name="${ZABBIX_HOST_NAME:-}"
+ local cfg_zabbix_alert_key="${ZABBIX_ALERT_KEY:-ssh.monitor.alert}"
+ local cfg_zabbix_seq_key="${ZABBIX_SEQ_KEY:-ssh.monitor.seq}"
  local cfg_log_file="${LOG_FILE}"
  local cfg_last_heartbeat_file="${LAST_HEARTBEAT_FILE}"
  local cfg_last_report_file="${LAST_REPORT_FILE}"
@@ -182,6 +179,15 @@ load_config() {
  local cfg_ban_list_file="${BAN_LIST_FILE}"
  local cfg_whitelist_ips_csv="${default_whitelist_ips_csv}"
  local cfg_whitelist_subnets_csv="${default_whitelist_subnets_csv}"
+ local cfg_notify_order="${NOTIFY_ORDER:-}"
+ local cfg_mail_smtp_host="${MAIL_SMTP_HOST:-}"
+ local cfg_mail_smtp_port="${MAIL_SMTP_PORT:-587}"
+ local cfg_mail_smtp_user="${MAIL_SMTP_USER:-}"
+ local cfg_mail_smtp_password="${MAIL_SMTP_PASSWORD:-}"
+ local cfg_mail_from="${MAIL_FROM:-}"
+ local cfg_mail_to="${MAIL_TO:-}"
+ local cfg_mail_smtp_starttls="${MAIL_SMTP_STARTTLS:-1}"
+ local cfg_mail_smtp_ssl="${MAIL_SMTP_SSL:-0}"
 
  if [ -f "$CONFIG_FILE" ]; then
  # shellcheck disable=SC1090
@@ -193,6 +199,10 @@ load_config() {
  TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-$cfg_telegram_bot_token}"
  TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-$cfg_telegram_chat_id}"
  BACKUP_WEBHOOK_URL="${BACKUP_WEBHOOK_URL:-$cfg_backup_webhook_url}"
+ ZABBIX_SERVER="$(trim_value "${ZABBIX_SERVER:-$cfg_zabbix_server}")"
+ ZABBIX_HOST_NAME="$(trim_value "${ZABBIX_HOST_NAME:-$cfg_zabbix_host_name}")"
+ ZABBIX_ALERT_KEY="$(trim_value "${ZABBIX_ALERT_KEY:-$cfg_zabbix_alert_key}")"
+ ZABBIX_SEQ_KEY="$(trim_value "${ZABBIX_SEQ_KEY:-$cfg_zabbix_seq_key}")"
  LOG_FILE="${LOG_FILE:-$cfg_log_file}"
  LAST_HEARTBEAT_FILE="${LAST_HEARTBEAT_FILE:-$cfg_last_heartbeat_file}"
  LAST_REPORT_FILE="${LAST_REPORT_FILE:-$cfg_last_report_file}"
@@ -224,6 +234,16 @@ load_config() {
  local whitelist_subnets_csv="${WHITELIST_SUBNETS:-$cfg_whitelist_subnets_csv}"
  csv_to_array "$whitelist_ips_csv" WHITELIST_IPS
  csv_to_array "$whitelist_subnets_csv" WHITELIST_SUBNETS
+
+ NOTIFY_ORDER="$(trim_value "${NOTIFY_ORDER:-$cfg_notify_order}")"
+ MAIL_SMTP_HOST="$(trim_value "${MAIL_SMTP_HOST:-$cfg_mail_smtp_host}")"
+ MAIL_SMTP_PORT="${MAIL_SMTP_PORT:-$cfg_mail_smtp_port}"
+ MAIL_SMTP_USER="$(trim_value "${MAIL_SMTP_USER:-$cfg_mail_smtp_user}")"
+ MAIL_SMTP_PASSWORD="${MAIL_SMTP_PASSWORD:-$cfg_mail_smtp_password}"
+ MAIL_FROM="$(trim_value "${MAIL_FROM:-$cfg_mail_from}")"
+ MAIL_TO="$(trim_value "${MAIL_TO:-$cfg_mail_to}")"
+ MAIL_SMTP_STARTTLS="${MAIL_SMTP_STARTTLS:-$cfg_mail_smtp_starttls}"
+ MAIL_SMTP_SSL="${MAIL_SMTP_SSL:-$cfg_mail_smtp_ssl}"
 }
 
 # Дата/время для ежедневного отчёта (час DAILY_REPORT_HOUR и «сегодня» в LAST_REPORT_FILE).
@@ -233,6 +253,62 @@ report_date() {
  else
  date "$@"
  fi
+}
+
+is_telegram_configured() {
+ [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]
+}
+
+is_zabbix_configured() {
+ [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ] && command -v zabbix_sender >/dev/null 2>&1
+}
+
+is_email_configured() {
+ [ -n "${MAIL_SMTP_HOST:-}" ] && [ -n "${MAIL_FROM:-}" ] && [ -n "${MAIL_TO:-}" ] && command -v python3 >/dev/null 2>&1
+}
+
+# Заполняет NOTIFY_CHAIN: при пустом NOTIFY_ORDER — только реально настроенные каналы (telegram → zabbix → email).
+# При непустом NOTIFY_ORDER — ровно указанная очередь (имена каналов), без добавления «лишних».
+refresh_notify_chain() {
+ NOTIFY_CHAIN=()
+ local order_raw
+ order_raw="$(trim_value "${NOTIFY_ORDER:-}")"
+
+ if [ -z "$order_raw" ]; then
+ if is_telegram_configured; then
+ NOTIFY_CHAIN+=(telegram)
+ fi
+ if is_zabbix_configured; then
+ NOTIFY_CHAIN+=(zabbix)
+ fi
+ if is_email_configured; then
+ NOTIFY_CHAIN+=(email)
+ fi
+ return 0
+ fi
+
+ local -a raw_toks=()
+ csv_to_array "$order_raw" raw_toks
+ local tok norm
+ for tok in "${raw_toks[@]}"; do
+ norm="${tok,,}"
+ case "$norm" in
+ telegram | tg) NOTIFY_CHAIN+=(telegram) ;;
+ zabbix | zbx) NOTIFY_CHAIN+=(zabbix) ;;
+ email | mail) NOTIFY_CHAIN+=(email) ;;
+ *)
+ printf 'WARN: NOTIFY_ORDER: неизвестный токен «%s», пропускаю\n' "$tok" >&2
+ ;;
+ esac
+ done
+}
+
+notify_chain_human() {
+ if [ "${#NOTIFY_CHAIN[@]}" -eq 0 ]; then
+ printf '%s' "нет активных каналов"
+ return 0
+ fi
+ (IFS=','; printf '%s' "${NOTIFY_CHAIN[*]}")
 }
 
 validate_config() {
@@ -245,6 +321,8 @@ validate_config() {
  validate_numeric_or_default "BRUTE_WINDOW_SEC" "900"
  validate_numeric_or_default "BRUTE_MIN_FAILS" "30"
  validate_numeric_or_default "BRUTE_NOTIFY_COOLDOWN_SEC" "3600"
+ validate_numeric_or_default "MAIL_SMTP_PORT" "587"
+ refresh_notify_chain
 }
 
 # ============================================
@@ -365,8 +443,85 @@ write_log() {
 }
 
 # ============================================
-# УВЕДОМЛЕНИЯ: Telegram + резервный webhook
+# УВЕДОМЛЕНИЯ: telegram / zabbix / email (каскад по NOTIFY_CHAIN)
 # ============================================
+
+send_email_raw() {
+ local message="$1"
+ [ -n "$message" ] || return 1
+ is_email_configured || return 1
+
+ local use_ssl use_starttls
+ use_ssl="${MAIL_SMTP_SSL:-0}"
+ use_starttls="${MAIL_SMTP_STARTTLS:-1}"
+
+ if MAIL_BODY="$message" \
+ MAIL_SMTP_HOST="$MAIL_SMTP_HOST" \
+ MAIL_SMTP_PORT="${MAIL_SMTP_PORT:-587}" \
+ MAIL_SMTP_USER="${MAIL_SMTP_USER:-}" \
+ MAIL_SMTP_PASSWORD="${MAIL_SMTP_PASSWORD:-}" \
+ MAIL_FROM="$MAIL_FROM" \
+ MAIL_TO="$MAIL_TO" \
+ MAIL_USE_SSL="$use_ssl" \
+ MAIL_USE_STARTTLS="$use_starttls" \
+ python3 - <<'PY'
+import os, smtplib, ssl, sys, socket
+from email.message import EmailMessage
+
+host = (os.environ.get("MAIL_SMTP_HOST") or "").strip()
+if not host:
+    sys.exit(1)
+try:
+    port = int(os.environ.get("MAIL_SMTP_PORT") or "587")
+except ValueError:
+    port = 587
+
+from_addr = (os.environ.get("MAIL_FROM") or "").strip()
+to_raw = (os.environ.get("MAIL_TO") or "").strip()
+if not from_addr or not to_raw:
+    sys.exit(1)
+recipients = [x.strip() for x in to_raw.split(",") if x.strip()]
+if not recipients:
+    sys.exit(1)
+
+user = (os.environ.get("MAIL_SMTP_USER") or "").strip()
+password = os.environ.get("MAIL_SMTP_PASSWORD") or ""
+use_ssl = (os.environ.get("MAIL_USE_SSL") or "0").strip() in ("1", "true", "yes", "on")
+use_starttls = (os.environ.get("MAIL_USE_STARTTLS") or "1").strip() in ("1", "true", "yes", "on")
+
+body = os.environ.get("MAIL_BODY") or ""
+
+msg = EmailMessage()
+msg["Subject"] = "[ssh-monitor] " + socket.gethostname()
+msg["From"] = from_addr
+msg["To"] = ", ".join(recipients)
+msg.set_content(body, charset="utf-8")
+
+ctx = ssl.create_default_context()
+try:
+    if use_ssl:
+        with smtplib.SMTP_SSL(host, port, context=ctx, timeout=30) as s:
+            if user:
+                s.login(user, password)
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP(host, port, timeout=30) as s:
+            s.ehlo()
+            if use_starttls:
+                s.starttls(context=ctx)
+                s.ehlo()
+            if user:
+                s.login(user, password)
+            s.send_message(msg)
+except Exception:
+    sys.exit(1)
+sys.exit(0)
+PY
+ then
+ return 0
+ fi
+ return 1
+}
 
 send_telegram_raw() {
  local message="$1"
@@ -411,20 +566,78 @@ PY
  return 1
 }
 
+send_zabbix_trapper() {
+ local message="${1:-}"
+ [ -n "$message" ] || return 1
+ [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ] || return 1
+ command -v zabbix_sender >/dev/null 2>&1 || return 1
+
+ local key_al="${ZABBIX_ALERT_KEY:-ssh.monitor.alert}"
+ local key_sq="${ZABBIX_SEQ_KEY:-ssh.monitor.seq}"
+ [ -n "$key_al" ] || key_al="ssh.monitor.alert"
+ [ -n "$key_sq" ] || key_sq="ssh.monitor.seq"
+
+ local one_line
+ one_line="$(printf '%s' "$message" | tr '\n\r\t' '   ')"
+ local max_len=60000
+ if [ "${#one_line}" -gt "$max_len" ]; then
+ one_line="${one_line:0:$max_len}..."
+ fi
+
+ ZABBIX_EVENT_SEQ=$((ZABBIX_EVENT_SEQ + 1))
+
+ local tmp
+ tmp="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.XXXXXX" 2>/dev/null)" || return 1
+ {
+ printf '%s\t%s\n' "$key_al" "$one_line"
+ printf '%s\t%s\n' "$key_sq" "$ZABBIX_EVENT_SEQ"
+ } >"$tmp" || {
+ rm -f "$tmp"
+ return 1
+ }
+
+ if zabbix_sender -z "$ZABBIX_SERVER" -s "$ZABBIX_HOST_NAME" -i "$tmp" >/dev/null 2>&1; then
+ rm -f "$tmp"
+ return 0
+ fi
+ rm -f "$tmp"
+ return 1
+}
+
 notify_send() {
  local message="$1"
  if [ "${DRY_RUN:-0}" = "1" ]; then
  printf '[DRY-RUN notify] %s\n' "$(printf '%s' "$message" | tr '\n' ' ')" >&2
  return 0
  fi
+
+ local ch
+ for ch in "${NOTIFY_CHAIN[@]}"; do
+ case "$ch" in
+ telegram)
  if send_telegram_raw "$message"; then
  return 0
  fi
- if send_backup_webhook_raw "$message"; then
- write_log "WARN: Telegram недоступен, сообщение ушло в BACKUP_WEBHOOK_URL"
+ ;;
+ zabbix)
+ if send_zabbix_trapper "$message"; then
  return 0
  fi
- write_log "WARN: не удалось отправить уведомление (Telegram и резервный канал)"
+ ;;
+ email)
+ if send_email_raw "$message"; then
+ return 0
+ fi
+ ;;
+ esac
+ done
+
+ if send_backup_webhook_raw "$message"; then
+ write_log "WARN: основные каналы недоступны, сообщение ушло в BACKUP_WEBHOOK_URL"
+ return 0
+ fi
+
+ write_log "WARN: не удалось доставить уведомление (каналы: $(notify_chain_human); BACKUP_WEBHOOK не задан или недоступен)"
  return 1
 }
 
@@ -721,44 +934,17 @@ extract_ssh_client_ip() {
  printf '%s' "$ip"
 }
 
-# Единая логика меток для SSH / sudo / logind:
-# нет файла или в нём не положительное unix-время → записать «сейчас», залогировать,
-# вернуть 0 (вызывающий пропускает разбор бэклога). Иначе: CHECKPOINT_STAMP=метка, вернуть 1.
-CHECKPOINT_STAMP=""
-checkpoint_stamp_init_if_bad() {
- local path="$1"
- local log_label="$2"
- CHECKPOINT_STAMP=""
- local ts
- ts=$(date '+%s')
- if [ ! -f "$path" ]; then
- echo "$ts" >"$path" || true
- write_log "${log_label}: первый запуск — создан ${path}; бэклог не обрабатывается."
- return 0
- fi
- local raw
- raw="$(tr -d ' \t\r\n' <"$path" 2>/dev/null || true)"
- if ! [[ "$raw" =~ ^[0-9]+$ ]] || [ "${raw:-0}" -le 0 ]; then
- echo "$ts" >"$path" || true
- write_log "${log_label}: в ${path} ожидается положительное unix-время; значение пересоздано, бэклог не обрабатывается."
- return 0
- fi
- CHECKPOINT_STAMP="$raw"
- return 1
-}
-
 # ============================================
 # Мониторинг SSH
 # ============================================
 
 monitor_ssh() {
+ local last_check="0"
+ if [ -f "$LAST_SSH_CHECK_FILE" ]; then
+ last_check="$(<"$LAST_SSH_CHECK_FILE")"
+ fi
  local current_time
  current_time=$(date '+%s')
-
- if checkpoint_stamp_init_if_bad "$LAST_SSH_CHECK_FILE" "SSH-мониторинг"; then
- return 0
- fi
- local last_check="$CHECKPOINT_STAMP"
 
  local ssh_logs=""
  if command -v journalctl >/dev/null 2>&1; then
@@ -873,15 +1059,22 @@ parse_sudo_audit_line() {
 }
 
 monitor_sudo() {
+ local last_check="0"
+ if [ -f "$LAST_SUDO_CHECK_FILE" ]; then
+ last_check="$(<"$LAST_SUDO_CHECK_FILE")"
+ fi
+ if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
+ last_check=0
+ fi
  local current_time
  current_time=$(date '+%s')
 
- if checkpoint_stamp_init_if_bad "$LAST_SUDO_CHECK_FILE" "SUDO-мониторинг"; then
- return 0
+ local since_journal
+ if [ "$last_check" -eq 0 ]; then
+ since_journal="--since=-30m"
+ else
+ since_journal="--since=@${last_check}"
  fi
- local last_check="$CHECKPOINT_STAMP"
-
- local since_journal="--since=@${last_check}"
 
  local sudo_logs=""
  if command -v journalctl >/dev/null 2>&1; then
@@ -1009,35 +1202,6 @@ logind_session_type() {
  loginctl show-session "$sid" -p Type 2>/dev/null | sed -n 's/^Type=//p' | tr -d '[:space:]'
 }
 
-# Не слать второе Telegram при LOGIND_SKIP_REMOTE: сессия уже покрыта monitor_ssh.
-# Часто Type=ssh; на многих дистрибутивах SSH — это Type=tty + Service=sshd (или путь к sshd).
-# Пустой ответ loginctl на первом запросе возможен из-за гонки с journal — несколько коротких повторов.
-logind_session_is_ssh_duplicate_for_notify() {
- local sid="$1"
- [ -z "$sid" ] && return 1
- if ! command -v loginctl >/dev/null 2>&1; then
- return 1
- fi
- local attempt st svc svc_lc
- for attempt in 1 2 3 4 5; do
- local props
- props=$(loginctl show-session "$sid" -p Type -p Service 2>/dev/null || true)
- st=$(printf '%s\n' "$props" | sed -n 's/^Type=//p' | head -n1 | tr -d '[:space:]')
- svc=$(printf '%s\n' "$props" | sed -n 's/^Service=//p' | head -n1 | tr -d '[:space:]')
- svc_lc=$(printf '%s' "$svc" | tr '[:upper:]' '[:lower:]')
- if [ "$st" = "ssh" ] || [[ "$svc_lc" == *sshd* ]]; then
- return 0
- fi
- if [ -n "$st" ] || [ -n "$svc" ]; then
- return 1
- fi
- if [ "$attempt" -lt 5 ]; then
- sleep 0.2
- fi
- done
- return 1
-}
-
 parse_logind_new_session() {
  local line="$1"
  local -n out_sid="$2"
@@ -1065,15 +1229,23 @@ monitor_logind() {
  return 0
  fi
 
+ local last_check="0"
+ if [ -f "$LAST_LOGIND_CHECK_FILE" ]; then
+ last_check="$(<"$LAST_LOGIND_CHECK_FILE")"
+ fi
+ if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
+ last_check=0
+ fi
+
+ local since_journal
+ if [ "$last_check" -eq 0 ]; then
+ since_journal="--since=-30m"
+ else
+ since_journal="--since=@${last_check}"
+ fi
+
  local current_time
  current_time=$(date '+%s')
-
- if checkpoint_stamp_init_if_bad "$LAST_LOGIND_CHECK_FILE" "LOGIND-мониторинг"; then
- return 0
- fi
- local last_check="$CHECKPOINT_STAMP"
-
- local since_journal="--since=@${last_check}"
 
  local logind_lines
  logind_lines=$(journalctl -u systemd-logind $since_journal --until="now" -o cat --no-pager 2>/dev/null || true)
@@ -1089,8 +1261,10 @@ monitor_logind() {
  local sid="" user=""
  if parse_logind_new_session "$line" sid user; then
  if [ "${LOGIND_SKIP_REMOTE:-1}" = "1" ] && [ -n "$sid" ]; then
- if logind_session_is_ssh_duplicate_for_notify "$sid"; then
- write_log "LOGIND: новая сессия (SSH уже в monitor_ssh, Telegram пропущен): ${line}"
+ local st
+ st=$(logind_session_type "$sid")
+ if [ "$st" = "ssh" ]; then
+ write_log "LOGIND: новая сессия (тип ssh, уведомление от ssh-monitor): ${line}"
  continue
  fi
  fi
@@ -1279,28 +1453,6 @@ check_daily_report() {
 # Heartbeat
 # ============================================
 
-# Для уведомлений: «hostname (IPv4)»; без доступного IPv4 — только hostname.
-server_display_name_with_ip() {
- local hn ip
- hn=$(hostname 2>/dev/null | tr -d '\r\n')
- [ -z "$hn" ] && hn="(unknown)"
- ip=""
- if command -v ip >/dev/null 2>&1; then
- ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/\bsrc\b/ {for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
- [ -z "$ip" ] && ip=$(ip -4 route get 8.8.8.8 2>/dev/null | awk '/\bsrc\b/ {for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
- fi
- if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
- if hostname -I >/dev/null 2>&1; then
- ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -Ev '^(127\.|0\.0\.0\.0)$' | head -n1)
- fi
- fi
- if [ -n "$ip" ]; then
- printf '%s (%s)' "$hn" "$ip"
- else
- printf '%s' "$hn"
- fi
-}
-
 send_heartbeat() {
  local timestamp
  timestamp=$(date '+%s')
@@ -1308,7 +1460,7 @@ send_heartbeat() {
  timestamp_human=$(date '+%d.%m.%Y %H:%M:%S')
 
  local message=" ❤️ Heartbeat - скрипт мониторинга работает "$'\n'
- message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
+ message="${message}🖥️ Сервер: $(hostname)"$'\n'
  message="${message}🕐 Время: ${timestamp_human}"
 
  notify_send "$message"
@@ -1341,7 +1493,7 @@ write_health_and_metrics() {
  ts=$(date '+%s')
  if [ -n "${HEALTHCHECK_STATUS_FILE:-}" ]; then
  mkdir -p "$(dirname "$HEALTHCHECK_STATUS_FILE")" 2>/dev/null || true
- printf '{"ts":%s,"hostname":"%s","version":"%s","dry_run":%s}\n' "$ts" "$(hostname | sed 's/"/\\"/g')" "$(ssh_monitor_version_display | sed 's/"/\\"/g')" "$([[ "${DRY_RUN:-0}" = "1" ]] && echo true || echo false)" >"${HEALTHCHECK_STATUS_FILE}.tmp"
+ printf '{"ts":%s,"hostname":"%s","dry_run":%s}\n' "$ts" "$(hostname | sed 's/"/\\"/g')" "$([[ "${DRY_RUN:-0}" = "1" ]] && echo true || echo false)" >"${HEALTHCHECK_STATUS_FILE}.tmp"
  mv "${HEALTHCHECK_STATUS_FILE}.tmp" "$HEALTHCHECK_STATUS_FILE" 2>/dev/null || true
  fi
  if [ -n "${PROMETHEUS_TEXTFILE_DIR:-}" ]; then
@@ -1366,13 +1518,14 @@ send_startup_notification() {
  local whitelist_count=$((${#WHITELIST_IPS[@]} + ${#WHITELIST_SUBNETS[@]}))
 
  local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН "$'\n'
- message="${message}📌 Версия: $(ssh_monitor_version_display)"$'\n'
  message="${message}🖥️ Сервер: $(hostname)"$'\n'
  message="${message}🕐 Время запуска: ${timestamp}"$'\n'
  message="${message}📊 Мониторинг SSH, SUDO и systemd-logind активирован"$'\n'
  message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд"$'\n'
  message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей"$'\n'
- message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"
+ message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"$'\n'
+ message="${message}📢 Каналы уведомлений (каскад): $(notify_chain_human)"$'\n'
+ message="${message}📌 Версия: ${SSH_MONITOR_VERSION:-?}"
 
  notify_send "$message"
  write_log "Скрипт мониторинга запущен (белый список: $whitelist_count записей)"
@@ -1428,8 +1581,10 @@ main() {
 
 run_check_config() {
  printf 'Проверка конфигурации ssh-monitor\n'
- printf 'Версия: %s\n' "$(ssh_monitor_version_display)"
+ printf 'SSH_MONITOR_VERSION=%s\n' "${SSH_MONITOR_VERSION:-}"
  printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
+ printf 'NOTIFY_ORDER=%s (пусто = авто: только настроенные, порядок telegram,zabbix,email)\n' "${NOTIFY_ORDER:-}"
+ printf 'NOTIFY_CHAIN (эффективная очередь)=%s\n' "$(notify_chain_human)"
  printf 'TELEGRAM: %s\n' "$([ -n "$TELEGRAM_BOT_TOKEN" ] && echo настроен || echo НЕ настроен)"
  printf 'BACKUP_WEBHOOK_URL: %s\n' "$([ -n "${BACKUP_WEBHOOK_URL:-}" ] && echo настроен || echo не задан)"
  printf 'LOG_FILE=%s\n' "$LOG_FILE"
@@ -1442,6 +1597,20 @@ run_check_config() {
  printf 'ENABLE_LOGIND_MONITOR=%s LAST_LOGIND_CHECK_FILE=%s\n' "${ENABLE_LOGIND_MONITOR:-}" "${LAST_LOGIND_CHECK_FILE:-}"
  printf 'LOGIND_NOTIFY_NEW=%s LOGIND_NOTIFY_REMOVED=%s LOGIND_NOTIFY_FAILED=%s LOGIND_SKIP_REMOTE=%s\n' \
   "${LOGIND_NOTIFY_NEW:-}" "${LOGIND_NOTIFY_REMOVED:-}" "${LOGIND_NOTIFY_FAILED:-}" "${LOGIND_SKIP_REMOTE:-}"
+ printf 'ZABBIX_SERVER=%s ZABBIX_HOST_NAME=%s\n' "${ZABBIX_SERVER:-}" "${ZABBIX_HOST_NAME:-}"
+ printf 'ZABBIX_ALERT_KEY=%s ZABBIX_SEQ_KEY=%s\n' "${ZABBIX_ALERT_KEY:-}" "${ZABBIX_SEQ_KEY:-}"
+ if [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ]; then
+ if command -v zabbix_sender >/dev/null 2>&1; then
+ printf 'zabbix_sender: найден (%s)\n' "$(command -v zabbix_sender)"
+ else
+ printf 'zabbix_sender: НЕ найден в PATH\n' >&2
+ fi
+ fi
+ printf 'MAIL_SMTP: host=%s port=%s from=%s to=%s STARTTLS=%s SSL=%s\n' \
+  "${MAIL_SMTP_HOST:-}" "${MAIL_SMTP_PORT:-}" "${MAIL_FROM:-}" "${MAIL_TO:-}" \
+  "${MAIL_SMTP_STARTTLS:-}" "${MAIL_SMTP_SSL:-}"
+ printf 'MAIL_SMTP_USER: %s\n' "$([ -n "${MAIL_SMTP_USER:-}" ] && echo задан || echo не задан)"
+ printf 'MAIL_SMTP_PASSWORD: %s\n' "$([ -n "${MAIL_SMTP_PASSWORD:-}" ] && echo задан || echo не задан)"
  if bash -n "$0" 2>/dev/null; then
  printf 'bash -n: OK\n'
  else
@@ -1456,7 +1625,6 @@ parse_args() {
  case "$a" in
  --check-config) CHECK_CONFIG_ONLY=1 ;;
  --dry-run) DRY_RUN=1 ;;
- --version|-V) SHOW_VERSION=1 ;;
  esac
  done
 }
@@ -1466,11 +1634,6 @@ parse_args() {
 # ============================================
 
 parse_args "$@"
-
-if [ "$SHOW_VERSION" = "1" ]; then
- printf '%s\n' "$(ssh_monitor_version_display)"
- exit 0
-fi
 
 load_config
 validate_config
@@ -1485,7 +1648,7 @@ trap send_shutdown_notification EXIT INT TERM
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 
-write_log "ssh-monitor $(ssh_monitor_version_display): конфигурация загружена из $CONFIG_FILE (или дефолты)"
+write_log "Конфигурация загружена из $CONFIG_FILE (или дефолты), версия ${SSH_MONITOR_VERSION:-?}, очередь оповещений: $(notify_chain_human)"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
  write_log "Режим DRY-RUN: iptables/ip6tables не меняются, уведомления печатаются в stderr"
