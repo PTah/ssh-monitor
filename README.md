@@ -17,7 +17,7 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 Поддерживаемые параметры:
 
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-- `NOTIFY_ORDER` — явная очередь каналов оповещений (`telegram`, `zabbix`, `email` и сокращения); пусто = в цепочку попадают только настроенные каналы (порядок по умолчанию см. в `ssh-monitor.conf.example`)
+- `NOTIFY_ORDER` — явная очередь каналов оповещений (`telegram`, `zabbix`, `email` и сокращения); пусто = в цепочку попадают только настроенные каналы (порядок по умолчанию см. в `ssh-monitor.conf.example`). Если итоговая цепочка пуста — скрипт не стартует (см. описание `NOTIFY_ORDER` ниже).
 - `ZABBIX_SERVER`, `ZABBIX_HOST_NAME`, `ZABBIX_ALERT_KEY`, `ZABBIX_SEQ_KEY` — отправка в Zabbix через `zabbix_sender`; подробнее — раздел **«Zabbix (`zabbix_sender`)»** ниже
 - `BACKUP_WEBHOOK_URL` — резервная доставка JSON `{"text":"..."}` (например Slack Incoming Webhook), если Telegram недоступен или вернул ошибку
 - `LOG_FILE`, `LAST_HEARTBEAT_FILE`, `LAST_REPORT_FILE`, `LAST_SSH_CHECK_FILE`, `LAST_SUDO_CHECK_FILE`, `LAST_SECURITY_EVENTS_FILE`, `LAST_LOGIND_CHECK_FILE`, `BAN_LIST_FILE`
@@ -36,7 +36,7 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота для отправки уведомлений.
 - `TELEGRAM_CHAT_ID` — ID чата/пользователя, куда отправляются уведомления.
-- `NOTIFY_ORDER` — CSV имён каналов (`telegram`, `zabbix`, `email` или `tg`, `zbx`, `mail`). Пустая строка: автоматически собирается цепочка только из реально настроенных каналов (по умолчанию порядок telegram → zabbix → email).
+- `NOTIFY_ORDER` — CSV имён каналов (`telegram`, `zabbix`, `email` или `tg`, `zbx`, `mail`). Пустая строка: автоматически собирается цепочка только из реально настроенных каналов (по умолчанию порядок telegram → zabbix → email). Если после сборки цепочки **нет ни одного** канала (ни Telegram, ни Zabbix, ни почты по критериям ниже), скрипт **сразу завершается** с ошибкой: **«Не настроен ни один канал отправки оповещений»** (в том числе режим `--check-config` и `--dry-run`).
 - `ZABBIX_SERVER` — имя или IP сервера Zabbix для `zabbix_sender -z` (пусто = канал Zabbix отключён).
 - `ZABBIX_HOST_NAME` — имя **хоста в Zabbix**, как в конфигурации агента/шаблона (`-s` у `zabbix_sender`); должно совпадать с тем, для какого хоста созданы trapper-элементы.
 - `ZABBIX_ALERT_KEY` — ключ **первого** trapper-элемента: в него уходит **текст** оповещения (одна строка, переводы строк заменены пробелами).

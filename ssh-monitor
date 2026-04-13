@@ -323,6 +323,10 @@ validate_config() {
  validate_numeric_or_default "BRUTE_NOTIFY_COOLDOWN_SEC" "3600"
  validate_numeric_or_default "MAIL_SMTP_PORT" "587"
  refresh_notify_chain
+ if [ "${#NOTIFY_CHAIN[@]}" -eq 0 ]; then
+ printf '%s\n' 'Не настроен ни один канал отправки оповещений' >&2
+ exit 1
+ fi
 }
 
 # ============================================
