@@ -6,6 +6,9 @@ IFS=$'\n\t'
 # КОНФИГУРАЦИЯ
 # ============================================
 
+# Семантическая версия. При запуске из git-репозитория к строке добавляется +<короткий sha> и при грязном дереве суффикс -dirty (см. ssh_monitor_version_display).
+SSH_MONITOR_VERSION="0.9.0"
+
 CONFIG_FILE="/etc/ssh-monitor.conf"
 
 TELEGRAM_BOT_TOKEN=""
@@ -66,9 +69,35 @@ declare -A FAIL_COUNTS
 declare -A BRUTE_LAST_NOTIFY
 
 CHECK_CONFIG_ONLY=0
+SHOW_VERSION=0
 DRY_RUN=0
 # Защита от двойного вызова: при SIGTERM срабатывает trap TERM, затем при выходе — trap EXIT
 SHUTDOWN_NOTIFIED=0
+
+# Полная строка версии для логов, --version и Telegram (без загрузки конфига).
+ssh_monitor_version_display() {
+ local ver base_dir rev
+ ver="${SSH_MONITOR_VERSION:-0.9.0}"
+ base_dir=""
+ if [ -n "${BASH_SOURCE[0]:-}" ]; then
+ base_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || base_dir=""
+ fi
+ if [ -z "$base_dir" ]; then
+ base_dir="$(cd "$(dirname "$0")" && pwd 2>/dev/null)" || base_dir=""
+ fi
+ if [ -n "$base_dir" ] && command -v git >/dev/null 2>&1; then
+ if git -C "$base_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+ rev=$(git -C "$base_dir" rev-parse --short HEAD 2>/dev/null || true)
+ if [ -n "$rev" ]; then
+ ver="${ver}+${rev}"
+ if ! git -C "$base_dir" diff --quiet 2>/dev/null; then
+ ver="${ver}-dirty"
+ fi
+ fi
+ fi
+ fi
+ printf '%s' "$ver"
+}
 
 trim_value() {
  local value="$1"
@@ -1311,7 +1340,7 @@ write_health_and_metrics() {
  ts=$(date '+%s')
  if [ -n "${HEALTHCHECK_STATUS_FILE:-}" ]; then
  mkdir -p "$(dirname "$HEALTHCHECK_STATUS_FILE")" 2>/dev/null || true
- printf '{"ts":%s,"hostname":"%s","dry_run":%s}\n' "$ts" "$(hostname | sed 's/"/\\"/g')" "$([[ "${DRY_RUN:-0}" = "1" ]] && echo true || echo false)" >"${HEALTHCHECK_STATUS_FILE}.tmp"
+ printf '{"ts":%s,"hostname":"%s","version":"%s","dry_run":%s}\n' "$ts" "$(hostname | sed 's/"/\\"/g')" "$(ssh_monitor_version_display | sed 's/"/\\"/g')" "$([[ "${DRY_RUN:-0}" = "1" ]] && echo true || echo false)" >"${HEALTHCHECK_STATUS_FILE}.tmp"
  mv "${HEALTHCHECK_STATUS_FILE}.tmp" "$HEALTHCHECK_STATUS_FILE" 2>/dev/null || true
  fi
  if [ -n "${PROMETHEUS_TEXTFILE_DIR:-}" ]; then
@@ -1336,6 +1365,7 @@ send_startup_notification() {
  local whitelist_count=$((${#WHITELIST_IPS[@]} + ${#WHITELIST_SUBNETS[@]}))
 
  local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН "$'\n'
+ message="${message}📌 Версия: $(ssh_monitor_version_display)"$'\n'
  message="${message}🖥️ Сервер: $(hostname)"$'\n'
  message="${message}🕐 Время запуска: ${timestamp}"$'\n'
  message="${message}📊 Мониторинг SSH, SUDO и systemd-logind активирован"$'\n'
@@ -1397,6 +1427,7 @@ main() {
 
 run_check_config() {
  printf 'Проверка конфигурации ssh-monitor\n'
+ printf 'Версия: %s\n' "$(ssh_monitor_version_display)"
  printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
  printf 'TELEGRAM: %s\n' "$([ -n "$TELEGRAM_BOT_TOKEN" ] && echo настроен || echo НЕ настроен)"
  printf 'BACKUP_WEBHOOK_URL: %s\n' "$([ -n "${BACKUP_WEBHOOK_URL:-}" ] && echo настроен || echo не задан)"
@@ -1424,6 +1455,7 @@ parse_args() {
  case "$a" in
  --check-config) CHECK_CONFIG_ONLY=1 ;;
  --dry-run) DRY_RUN=1 ;;
+ --version|-V) SHOW_VERSION=1 ;;
  esac
  done
 }
@@ -1433,6 +1465,11 @@ parse_args() {
 # ============================================
 
 parse_args "$@"
+
+if [ "$SHOW_VERSION" = "1" ]; then
+ printf '%s\n' "$(ssh_monitor_version_display)"
+ exit 0
+fi
 
 load_config
 validate_config
@@ -1447,7 +1484,7 @@ trap send_shutdown_notification EXIT INT TERM
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 
-write_log "Конфигурация загружена из $CONFIG_FILE (или дефолты)"
+write_log "ssh-monitor $(ssh_monitor_version_display): конфигурация загружена из $CONFIG_FILE (или дефолты)"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
  write_log "Режим DRY-RUN: iptables/ip6tables не меняются, уведомления печатаются в stderr"
