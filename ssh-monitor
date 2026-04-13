@@ -691,17 +691,44 @@ extract_ssh_client_ip() {
  printf '%s' "$ip"
 }
 
+# Единая логика меток для SSH / sudo / logind:
+# нет файла или в нём не положительное unix-время → записать «сейчас», залогировать,
+# вернуть 0 (вызывающий пропускает разбор бэклога). Иначе: CHECKPOINT_STAMP=метка, вернуть 1.
+CHECKPOINT_STAMP=""
+checkpoint_stamp_init_if_bad() {
+ local path="$1"
+ local log_label="$2"
+ CHECKPOINT_STAMP=""
+ local ts
+ ts=$(date '+%s')
+ if [ ! -f "$path" ]; then
+ echo "$ts" >"$path" || true
+ write_log "${log_label}: первый запуск — создан ${path}; бэклог не обрабатывается."
+ return 0
+ fi
+ local raw
+ raw="$(tr -d ' \t\r\n' <"$path" 2>/dev/null || true)"
+ if ! [[ "$raw" =~ ^[0-9]+$ ]] || [ "${raw:-0}" -le 0 ]; then
+ echo "$ts" >"$path" || true
+ write_log "${log_label}: в ${path} ожидается положительное unix-время; значение пересоздано, бэклог не обрабатывается."
+ return 0
+ fi
+ CHECKPOINT_STAMP="$raw"
+ return 1
+}
+
 # ============================================
 # Мониторинг SSH
 # ============================================
 
 monitor_ssh() {
- local last_check="0"
- if [ -f "$LAST_SSH_CHECK_FILE" ]; then
- last_check="$(<"$LAST_SSH_CHECK_FILE")"
- fi
  local current_time
  current_time=$(date '+%s')
+
+ if checkpoint_stamp_init_if_bad "$LAST_SSH_CHECK_FILE" "SSH-мониторинг"; then
+ return 0
+ fi
+ local last_check="$CHECKPOINT_STAMP"
 
  local ssh_logs=""
  if command -v journalctl >/dev/null 2>&1; then
@@ -816,22 +843,15 @@ parse_sudo_audit_line() {
 }
 
 monitor_sudo() {
- local last_check="0"
- if [ -f "$LAST_SUDO_CHECK_FILE" ]; then
- last_check="$(<"$LAST_SUDO_CHECK_FILE")"
- fi
- if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
- last_check=0
- fi
  local current_time
  current_time=$(date '+%s')
 
- local since_journal
- if [ "$last_check" -eq 0 ]; then
- since_journal="--since=-30m"
- else
- since_journal="--since=@${last_check}"
+ if checkpoint_stamp_init_if_bad "$LAST_SUDO_CHECK_FILE" "SUDO-мониторинг"; then
+ return 0
  fi
+ local last_check="$CHECKPOINT_STAMP"
+
+ local since_journal="--since=@${last_check}"
 
  local sudo_logs=""
  if command -v journalctl >/dev/null 2>&1; then
@@ -986,23 +1006,15 @@ monitor_logind() {
  return 0
  fi
 
- local last_check="0"
- if [ -f "$LAST_LOGIND_CHECK_FILE" ]; then
- last_check="$(<"$LAST_LOGIND_CHECK_FILE")"
- fi
- if ! [[ "$last_check" =~ ^[0-9]+$ ]]; then
- last_check=0
- fi
-
- local since_journal
- if [ "$last_check" -eq 0 ]; then
- since_journal="--since=-30m"
- else
- since_journal="--since=@${last_check}"
- fi
-
  local current_time
  current_time=$(date '+%s')
+
+ if checkpoint_stamp_init_if_bad "$LAST_LOGIND_CHECK_FILE" "LOGIND-мониторинг"; then
+ return 0
+ fi
+ local last_check="$CHECKPOINT_STAMP"
+
+ local since_journal="--since=@${last_check}"
 
  local logind_lines
  logind_lines=$(journalctl -u systemd-logind $since_journal --until="now" -o cat --no-pager 2>/dev/null || true)
