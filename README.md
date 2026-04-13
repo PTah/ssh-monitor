@@ -17,6 +17,8 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 Поддерживаемые параметры:
 
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- `NOTIFY_ORDER` — явная очередь каналов оповещений (`telegram`, `zabbix`, `email` и сокращения); пусто = в цепочку попадают только настроенные каналы (порядок по умолчанию см. в `ssh-monitor.conf.example`)
+- `ZABBIX_SERVER`, `ZABBIX_HOST_NAME`, `ZABBIX_ALERT_KEY`, `ZABBIX_SEQ_KEY` — отправка в Zabbix через `zabbix_sender`; подробнее — раздел **«Zabbix (`zabbix_sender`)»** ниже
 - `BACKUP_WEBHOOK_URL` — резервная доставка JSON `{"text":"..."}` (например Slack Incoming Webhook), если Telegram недоступен или вернул ошибку
 - `LOG_FILE`, `LAST_HEARTBEAT_FILE`, `LAST_REPORT_FILE`, `LAST_SSH_CHECK_FILE`, `LAST_SUDO_CHECK_FILE`, `LAST_SECURITY_EVENTS_FILE`, `LAST_LOGIND_CHECK_FILE`, `BAN_LIST_FILE`
 - `ENABLE_LOGIND_MONITOR`, `LOGIND_NOTIFY_NEW`, `LOGIND_NOTIFY_REMOVED`, `LOGIND_NOTIFY_FAILED`, `LOGIND_SKIP_REMOTE` — см. раздел «Мониторинг systemd-logind» ниже
@@ -34,6 +36,11 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота для отправки уведомлений.
 - `TELEGRAM_CHAT_ID` — ID чата/пользователя, куда отправляются уведомления.
+- `NOTIFY_ORDER` — CSV имён каналов (`telegram`, `zabbix`, `email` или `tg`, `zbx`, `mail`). Пустая строка: автоматически собирается цепочка только из реально настроенных каналов (по умолчанию порядок telegram → zabbix → email).
+- `ZABBIX_SERVER` — имя или IP сервера Zabbix для `zabbix_sender -z` (пусто = канал Zabbix отключён).
+- `ZABBIX_HOST_NAME` — имя **хоста в Zabbix**, как в конфигурации агента/шаблона (`-s` у `zabbix_sender`); должно совпадать с тем, для какого хоста созданы trapper-элементы.
+- `ZABBIX_ALERT_KEY` — ключ **первого** trapper-элемента: в него уходит **текст** оповещения (одна строка, переводы строк заменены пробелами).
+- `ZABBIX_SEQ_KEY` — ключ **второго** trapper-элемента: в него при каждой отправке пишется **монотонно растущий счётчик** (1, 2, 3, … за время работы процесса скрипта). Значение по умолчанию — `ssh.monitor.seq`. Назначение: чтобы Zabbix и триггеры видели **новое значение** даже при **одинаковом** тексте алерта (иначе повтор с тем же текстом может плохо отражаться на логике «изменилось ли значение»); также по счётчику удобнее отслеживать порядок событий. В шаблоне Zabbix нужны **два** элемента типа **Zabbix trapper** с ключами, совпадающими с `ZABBIX_ALERT_KEY` и `ZABBIX_SEQ_KEY` (второй — обычно **числовой**).
 - `BACKUP_WEBHOOK_URL` — URL для резервной отправки (тело JSON `{"text":"..."}`).
 - `LOG_FILE` — путь к основному лог-файлу скрипта.
 - `LAST_HEARTBEAT_FILE` — файл с timestamp последнего heartbeat-сообщения.
@@ -66,6 +73,17 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 - `WATCHDOG_LOG_FILE` — лог-файл watchdog-скрипта.
 - `WATCHDOG_SERVICE_NAME` — имя systemd-сервиса, который контролирует watchdog (по умолчанию `ssh-monitor.service`).
 - `WATCHDOG_NOTIFY_ON_RECOVERY` — `1` включает служебные сообщения watchdog при штатном состоянии, `0` отключает.
+
+### Zabbix (`zabbix_sender`)
+
+Канал активен, если в **`NOTIFY_CHAIN`** есть `zabbix`, заданы **`ZABBIX_SERVER`** и **`ZABBIX_HOST_NAME`**, в PATH есть **`zabbix_sender`**.
+
+При отправке формируется временный файл с **двумя** строками в формате `ключ<TAB>значение`:
+
+1. **`ZABBIX_ALERT_KEY`** (по умолчанию `ssh.monitor.alert`) — текст сообщения.
+2. **`ZABBIX_SEQ_KEY`** (по умолчанию `ssh.monitor.seq`) — целое **число-счётчик**, увеличивается на 1 при каждой отправке в Zabbix.
+
+Имеет смысл завести в Zabbix на соответствующем хосте **два trapper-элемента** с этими ключами. Ключ **`ZABBIX_SEQ_KEY`** можно переименовать в конфиге, если в вашем шаблоне приняты другие имена; смысл остаётся тем же: отдельный item под **последовательность**, а не под человекочитаемый текст.
 
 ### Мониторинг systemd-logind
 
