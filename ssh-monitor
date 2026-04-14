@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.5.6"
+SSH_MONITOR_VERSION="0.9.5.7"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -636,7 +636,8 @@ send_zabbix_trapper() {
  key_sq="$(printf '%s' "$key_sq" | tr -d '\r')"
 
  local one_line
- one_line="$(printf '%s' "$message" | tr '\n\r\t' '   ')"
+ # NUL в значении обрезает файл у первого \0 — Zabbix часто отвечает failed: 1
+ one_line="$(printf '%s' "$message" | tr -d '\000' | tr '\n\r\t' '   ')"
  local max_len=60000
  if [ "${#one_line}" -gt "$max_len" ]; then
  one_line="${one_line:0:$max_len}..."
