@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.5"
+SSH_MONITOR_VERSION="0.9.5.1"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
