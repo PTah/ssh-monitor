@@ -61,6 +61,10 @@ DAILY_REPORT_HOUR="9"
 # IANA-зона для «9:00» и календарной даты отчёта; пусто = как у команды date (обычно локаль сервера, см. timedatectl)
 DAILY_REPORT_TZ=""
 DAILY_REPORT_TOP_IPS="5"
+# IANA-зона для «🕐 Время» в Telegram/Zabbix/email. Пусто = как DAILY_REPORT_TZ, иначе зона процесса (часто UTC в systemd — см. README).
+NOTIFY_TZ=""
+# Не чаще 1 успешного SSH (Accepted) в Telegram на пару user+IP за N секунд (разные port в журнале). 0 = только дедуп внутри одного прохода.
+SSH_ACCEPT_NOTIFY_DEDUP_SEC="5"
 
 BAN_TIME="3600"
 MAX_ATTEMPTS="3"

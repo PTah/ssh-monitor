@@ -24,7 +24,7 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 - `BACKUP_WEBHOOK_URL` — резервная доставка JSON `{"text":"..."}` (например Slack Incoming Webhook), если каналы из **`NOTIFY_CHAIN`** недоступны или вернули ошибку; **не заменяет** обязательность хотя бы одного основного канала (см. шаг 3)
 - `LOG_FILE`, `LAST_HEARTBEAT_FILE`, `LAST_REPORT_FILE`, `LAST_SSH_CHECK_FILE`, `LAST_SUDO_CHECK_FILE`, `LAST_SECURITY_EVENTS_FILE`, `LAST_LOGIND_CHECK_FILE`, `BAN_LIST_FILE`
 - `ENABLE_LOGIND_MONITOR`, `LOGIND_NOTIFY_NEW`, `LOGIND_NOTIFY_REMOVED`, `LOGIND_NOTIFY_FAILED`, `LOGIND_SKIP_REMOTE` — см. раздел «Мониторинг systemd-logind» ниже
-- `DAILY_REPORT_HOUR` (0..23), `DAILY_REPORT_TZ` (опционально), `DAILY_REPORT_TOP_IPS`
+- `DAILY_REPORT_HOUR` (0..23), `DAILY_REPORT_TZ` (опционально), `NOTIFY_TZ` (опционально), `SSH_ACCEPT_NOTIFY_DEDUP_SEC`, `DAILY_REPORT_TOP_IPS`
 - `BRUTE_WINDOW_SEC`, `BRUTE_MIN_FAILS`, `BRUTE_NOTIFY_COOLDOWN_SEC`
 - `PROMETHEUS_TEXTFILE_DIR` — каталог для `ssh_monitor.prom` (совместимость с node_exporter textfile collector)
 - `HEALTHCHECK_STATUS_FILE` — путь к JSON-файлу с меткой последней итерации цикла
@@ -59,6 +59,8 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 - `LOGIND_SKIP_REMOTE` — `1` (по умолчанию): для новой сессии logind, если доступен `loginctl`, не отправляется второе Telegram, если сессия уже учтена в **`monitor_ssh`**: при **`Type=ssh`** или если **`Service`** указывает на **sshd** (часто **`Type=tty` + `Service=sshd`**); при пустом ответе `loginctl` делаются короткие повторы. Поставьте `0`, если нужны отдельные алерты logind и для SSH-сессий.
 - `DAILY_REPORT_HOUR` — час (0..23), после наступления которого в **текущих календарных сутках** (в выбранной ниже зоне) отправляется не более одного ежедневного отчёта.
 - `DAILY_REPORT_TZ` — необязательная **IANA**-зона (`Europe/Moscow`, `Asia/Yekaterinburg`, …). Если **пусто**, для отчёта используется та же зона, что и у команды `date` у процесса монитора (как правило, совпадает с `timedatectl` / `/etc/localtime` на сервере). Если сервис запускается с `TZ=UTC` в unit-файле, без `DAILY_REPORT_TZ` отчёт ориентируется на **UTC** — тогда задайте явную зону в конфиге.
+- `NOTIFY_TZ` — **IANA**-зона для строк **«🕐 Время»** в Telegram/Zabbix/email (и аналогичных текстах). **Пусто** — используется **`DAILY_REPORT_TZ`**, если она задана, иначе зона процесса. Частая причина «время в теле сообщения UTC, а в заголовке чата локальное»: в **`ssh-monitor.service`** задано **`Environment=TZ=UTC`** — тогда задайте **`NOTIFY_TZ`** (или **`DAILY_REPORT_TZ`**) на вашу локаль, например `Asia/Vladivostok`.
+- `SSH_ACCEPT_NOTIFY_DEDUP_SEC` — не чаще одного Telegram по **успешному SSH (`Accepted`)** на одну пару **пользователь + IP** за указанное число **секунд** (по умолчанию **5**). Снимает дубли, когда в journal две строки с **разными портами клиента** за один вход. **`0`** — отключить этот антидубль (останется только дедупликация внутри одного прохода `monitor_ssh` по `user|ip|port`).
 - `DAILY_REPORT_TOP_IPS` — сколько IP показывать в топе неудачных попыток за 24 часа.
 - `BRUTE_WINDOW_SEC` — окно (секунды) для оценки «массового» брутфорса по `journalctl`.
 - `BRUTE_MIN_FAILS` — минимум неудачных попыток за окно для тревоги.
@@ -105,7 +107,7 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 - Без **`journalctl`** на хосте этот блок **не работает** (как и часть других функций, завязанных на journal).
 - Для разбора «новой сессии» используются типичные англоязычные форматы (`New session … of user …`). При несовпадении формата строка всё равно попадёт в лог с пометкой о неудачном разборе.
 - **`loginctl`** нужен для **`LOGIND_SKIP_REMOTE`**: по `Type` и **`Service`** решается, не дублировать ли Telegram с **`monitor_ssh`** (см. описание `LOGIND_SKIP_REMOTE` выше).
-- **`monitor_ssh`**: события **sshd** читаются из journal преимущественно как **`journalctl _COMM=sshd`** (запасные варианты — юниты `sshd` / `ssh`), строки **`sort -u`**, а для **`Accepted`** в одном проходе цикла подавляется повтор с тем же **пользователем, IP и номером порта клиента** — чтобы не было двух одинаковых «успешных SSH» из дублирующихся записей журнала.
+- **`monitor_ssh`**: события **sshd** читаются из journal преимущественно как **`journalctl _COMM=sshd`** (запасные варианты — юниты `sshd` / `ssh`), строки **`sort -u`**, для **`Accepted`** в одном проходе — дедуп по **пользователь|IP|порт**; между проходами цикла — пауза **`SSH_ACCEPT_NOTIFY_DEDUP_SEC`** для той же пары **пользователь|IP** (см. переменную в конфиге).
 
 Команда **`ssh-monitor --check-config`** выводит актуальные значения, в том числе параметры logind.
 

@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.5.1"
+SSH_MONITOR_VERSION="0.9.5.2"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -42,6 +42,10 @@ DAILY_REPORT_TOP_IPS=5
 # Пусто = календарь и час отчёта в зоне процесса (как `date`, обычно совпадает с /etc/localtime).
 # Иначе IANA, например Europe/Moscow — явная зона для DAILY_REPORT_HOUR и даты «сегодня» в отчёте.
 DAILY_REPORT_TZ=""
+# IANA-зона для строк «🕐 Время» в Telegram/Zabbix/email. Пусто = тогда DAILY_REPORT_TZ, если она задана, иначе зона процесса (часто UTC у systemd — см. README).
+NOTIFY_TZ=""
+# Не слать повтор «Accepted» для той же пары user+IP чаще, чем раз в N секунд (разные port в журнале — один вход).
+SSH_ACCEPT_NOTIFY_DEDUP_SEC=5
 
 # Временные файлы для отслеживания уже обработанных событий
 LAST_SSH_CHECK_FILE="/var/log/last_ssh_check"
@@ -85,6 +89,7 @@ WHITELIST_SUBNETS=(
 
 declare -A FAIL_COUNTS
 declare -A BRUTE_LAST_NOTIFY
+declare -A SSH_ACCEPT_LAST_NOTIFY
 
 CHECK_CONFIG_ONLY=0
 DRY_RUN=0
@@ -158,6 +163,8 @@ load_config() {
  local cfg_daily_report_hour="${DAILY_REPORT_HOUR}"
  local cfg_daily_report_top_ips="${DAILY_REPORT_TOP_IPS}"
  local cfg_daily_report_tz="${DAILY_REPORT_TZ}"
+ local cfg_notify_tz="${NOTIFY_TZ:-}"
+ local cfg_ssh_accept_notify_dedup_sec="${SSH_ACCEPT_NOTIFY_DEDUP_SEC:-5}"
  local cfg_last_ssh_check_file="${LAST_SSH_CHECK_FILE}"
  local cfg_last_sudo_check_file="${LAST_SUDO_CHECK_FILE}"
  local cfg_last_security_events_file="${LAST_SECURITY_EVENTS_FILE}"
@@ -222,6 +229,11 @@ load_config() {
  DAILY_REPORT_HOUR="${DAILY_REPORT_HOUR:-$cfg_daily_report_hour}"
  DAILY_REPORT_TOP_IPS="${DAILY_REPORT_TOP_IPS:-$cfg_daily_report_top_ips}"
  DAILY_REPORT_TZ="$(trim_value "${DAILY_REPORT_TZ:-$cfg_daily_report_tz}")"
+ NOTIFY_TZ="$(trim_value "${NOTIFY_TZ:-$cfg_notify_tz}")"
+ SSH_ACCEPT_NOTIFY_DEDUP_SEC="$(trim_value "${SSH_ACCEPT_NOTIFY_DEDUP_SEC:-$cfg_ssh_accept_notify_dedup_sec}")"
+ if ! [[ "${SSH_ACCEPT_NOTIFY_DEDUP_SEC:-5}" =~ ^[0-9]+$ ]]; then
+ SSH_ACCEPT_NOTIFY_DEDUP_SEC=5
+ fi
  BRUTE_WINDOW_SEC="${BRUTE_WINDOW_SEC:-$cfg_brute_window_sec}"
  BRUTE_MIN_FAILS="${BRUTE_MIN_FAILS:-$cfg_brute_min_fails}"
  BRUTE_NOTIFY_COOLDOWN_SEC="${BRUTE_NOTIFY_COOLDOWN_SEC:-$cfg_brute_notify_cooldown_sec}"
@@ -249,6 +261,17 @@ load_config() {
 # Дата/время для ежедневного отчёта (час DAILY_REPORT_HOUR и «сегодня» в LAST_REPORT_FILE).
 report_date() {
  if [ -n "${DAILY_REPORT_TZ:-}" ]; then
+ TZ="$DAILY_REPORT_TZ" date "$@"
+ else
+ date "$@"
+ fi
+}
+
+# Время в текстах уведомлений (Telegram и др.): явная зона, иначе как у ежедневного отчёта, иначе как у процесса.
+notification_date() {
+ if [ -n "${NOTIFY_TZ:-}" ]; then
+ TZ="$NOTIFY_TZ" date "$@"
+ elif [ -n "${DAILY_REPORT_TZ:-}" ]; then
  TZ="$DAILY_REPORT_TZ" date "$@"
  else
  date "$@"
@@ -802,7 +825,7 @@ block_ip() {
  message="${message}🌐 IP: ${ip}"$'\n'
  message="${message}📊 Неудачных попыток: ${attempts}"$'\n'
  message="${message}⏱️ Блокировка на: ${ban_time_hours} час(ов)"$'\n'
- message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$message"
  write_log "AUTO-BAN: IP $ip заблокирован на $ban_time_hours часов ($attempts попыток)"
 }
@@ -827,7 +850,7 @@ unblock_expired_ips() {
 
  local message=" 🔓 IP РАЗБЛОКИРОВАН "$'\n'
  message="${message}🌐 IP: ${ip}"$'\n'
- message="${message}🕐 Время разблокировки: $(date '+%d.%m.%Y %H:%M:%S')"
+ message="${message}🕐 Время разблокировки: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$message"
 
  unblocked=$((unblocked + 1))
@@ -980,17 +1003,31 @@ monitor_ssh() {
  write_log "SSH Accepted: дубль в журнале (user=${user} ip=${ip:-} port=${dedupe_port:-?}), второе уведомление не отправляем"
  continue
  fi
+ local dedupe_net_key last_nf now_ded delta
+ dedupe_net_key="${user}|${ip:-}"
+ if [[ "${SSH_ACCEPT_NOTIFY_DEDUP_SEC:-5}" =~ ^[0-9]+$ ]] && [ "${SSH_ACCEPT_NOTIFY_DEDUP_SEC:-5}" -gt 0 ]; then
+ now_ded=$(date '+%s')
+ last_nf="${SSH_ACCEPT_LAST_NOTIFY[$dedupe_net_key]:-0}"
+ if [ "${last_nf:-0}" -gt 0 ]; then
+ delta=$((now_ded - last_nf))
+ if [ "$delta" -ge 0 ] && [ "$delta" -lt "$SSH_ACCEPT_NOTIFY_DEDUP_SEC" ]; then
+ write_log "SSH Accepted: повтор для user=${user} ip=${ip:-} через ${delta}s (< ${SSH_ACCEPT_NOTIFY_DEDUP_SEC}s), второе Telegram не отправляем"
+ continue
+ fi
+ fi
+ fi
  SSH_ACCEPT_NOTIFY_KEYS[$dedupe_key]=1
+ SSH_ACCEPT_LAST_NOTIFY[$dedupe_net_key]=$(date '+%s')
  local message=" ✅ УСПЕШНОЕ SSH ПОДКЛЮЧЕНИЕ "$'\n'
  message="${message}👤 Пользователь: ${user}"$'\n'
  message="${message}🌐 IP адрес: ${ip:-local}"$'\n'
- message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$message"
  write_log "SSH успешный вход: $user с IP ${ip:-local}"
  if [ "$user" = "root" ]; then
  local rmsg=" 🔑 SSH ВХОД ПОД ROOT "$'\n'
  rmsg="${rmsg}🌐 IP: ${ip:-local}"$'\n'
- rmsg="${rmsg}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ rmsg="${rmsg}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$rmsg"
  fi
  fi
@@ -1019,7 +1056,7 @@ monitor_ssh() {
  message="${message}👤 Пользователь: ${user}"$'\n'
  message="${message}🌐 IP адрес: ${ip}"$'\n'
  message="${message}📊 Попытка ${current_attempts} из ${MAX_ATTEMPTS}"$'\n'
- message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$message"
  fi
  write_log "SSH неудачная попытка: $user с IP $ip (попытка $current_attempts из $MAX_ATTEMPTS)"
@@ -1134,7 +1171,7 @@ monitor_sudo() {
  fi
  message="${message}💻 Команда: ${sudo_cmd}"$'\n'
  message="${message}📁 Директория: ${pwd:-unknown}"$'\n'
- message="${message}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$message"
  write_log "SUDO: $user выполнил $sudo_cmd${run_as:+ (USER=$run_as)}"
  fi
@@ -1175,7 +1212,7 @@ monitor_security_events() {
  hk="$(echo "$chunk" | grep -Ei "REMOTE HOST IDENTIFICATION HAS CHANGED" | head -n 3)"
  local m=" 🔐 ВНИМАНИЕ: изменение SSH host key / MITM? "$'\n'
  m="${m}$(printf '%s\n' "$hk")"
- m="${m}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ m="${m}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$m"
  write_log "SECURITY: обнаружено сообщение об изменении host key"
  fi
@@ -1196,7 +1233,7 @@ monitor_security_events() {
  local bm=" 🧨 ВОЗМОЖНЫЙ МАССОВЫЙ БРУТФОРС SSH "$'\n'
  bm="${bm}🌐 IP: ${ip}"$'\n'
  bm="${bm}📊 Неудачных попыток за ~${BRUTE_WINDOW_SEC}s: ${count}"$'\n'
- bm="${bm}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ bm="${bm}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$bm"
  write_log "SECURITY: массовый брутфорс? IP=$ip fails=${count} за окно ${BRUTE_WINDOW_SEC}s"
  fi
@@ -1307,7 +1344,7 @@ monitor_logind() {
  local msg=" 🖥️ НОВАЯ СЕССИЯ (systemd-logind) "$'\n'
  msg="${msg}👤 Пользователь: ${user:-неизвестно}"$'\n'
  msg="${msg}🆔 Сессия: ${sid:-?}"$'\n'
- msg="${msg}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ msg="${msg}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$msg"
  write_log "LOGIND: новая сессия: ${line}"
  else
@@ -1324,7 +1361,7 @@ monitor_logind() {
  fi
  local msg_r=" 🚪 СЕССИЯ ЗАКРЫТА (systemd-logind) "$'\n'
  msg_r="${msg_r}🆔 Сессия: ${sess_r:-?}"$'\n'
- msg_r="${msg_r}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ msg_r="${msg_r}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$msg_r"
  fi
 
@@ -1332,7 +1369,7 @@ monitor_logind() {
  if [ "${LOGIND_NOTIFY_FAILED:-1}" = "1" ]; then
  local msg_f=" ❌ СБОЙ (systemd-logind) "$'\n'
  msg_f="${msg_f}📝 ${line}"$'\n'
- msg_f="${msg_f}🕐 Время: $(date '+%d.%m.%Y %H:%M:%S')"
+ msg_f="${msg_f}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$msg_f"
  write_log "LOGIND: сбой: $line"
  fi
@@ -1515,7 +1552,7 @@ send_heartbeat() {
  local timestamp
  timestamp=$(date '+%s')
  local timestamp_human
- timestamp_human=$(date '+%d.%m.%Y %H:%M:%S')
+ timestamp_human=$(notification_date '+%d.%m.%Y %H:%M:%S')
 
  local message=" ❤️ Heartbeat - скрипт мониторинга работает "$'\n'
  message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
@@ -1572,7 +1609,7 @@ write_health_and_metrics() {
 
 send_startup_notification() {
  local timestamp
- timestamp=$(date '+%d.%m.%Y %H:%M:%S')
+ timestamp=$(notification_date '+%d.%m.%Y %H:%M:%S')
  local whitelist_count=$((${#WHITELIST_IPS[@]} + ${#WHITELIST_SUBNETS[@]}))
 
  local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН "$'\n'
@@ -1594,7 +1631,7 @@ send_shutdown_notification() {
  SHUTDOWN_NOTIFIED=1
 
  local timestamp
- timestamp=$(date '+%d.%m.%Y %H:%M:%S')
+ timestamp=$(notification_date '+%d.%m.%Y %H:%M:%S')
  local message=" ⚠️ СКРИПТ МОНИТОРИНГА ОСТАНОВЛЕН "$'\n'
  message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время остановки: ${timestamp}"
@@ -1648,6 +1685,8 @@ run_check_config() {
  printf 'LOG_FILE=%s\n' "$LOG_FILE"
  printf 'DAILY_REPORT_HOUR=%s\n' "$DAILY_REPORT_HOUR"
  printf 'DAILY_REPORT_TZ=%s (пусто = зона процесса/date)\n' "${DAILY_REPORT_TZ:-}"
+ printf 'NOTIFY_TZ=%s (пусто = DAILY_REPORT_TZ или зона процесса; см. README)\n' "${NOTIFY_TZ:-}"
+ printf 'SSH_ACCEPT_NOTIFY_DEDUP_SEC=%s\n' "${SSH_ACCEPT_NOTIFY_DEDUP_SEC:-5}"
  printf 'DAILY_REPORT_TOP_IPS=%s\n' "$DAILY_REPORT_TOP_IPS"
  printf 'BRUTE_WINDOW_SEC=%s BRUTE_MIN_FAILS=%s\n' "$BRUTE_WINDOW_SEC" "$BRUTE_MIN_FAILS"
  printf 'PROMETHEUS_TEXTFILE_DIR=%s\n' "${PROMETHEUS_TEXTFILE_DIR:-}"
