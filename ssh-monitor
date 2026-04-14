@@ -1311,6 +1311,28 @@ monitor_logind() {
  echo "$current_time" >"$LAST_LOGIND_CHECK_FILE"
 }
 
+# Для Telegram и отчётов: «hostname (IPv4)»; без доступного IPv4 — только hostname.
+server_display_name_with_ip() {
+ local hn ip
+ hn=$(hostname 2>/dev/null | tr -d '\r\n')
+ [ -z "$hn" ] && hn="(unknown)"
+ ip=""
+ if command -v ip >/dev/null 2>&1; then
+ ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/\bsrc\b/ {for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
+ [ -z "$ip" ] && ip=$(ip -4 route get 8.8.8.8 2>/dev/null | awk '/\bsrc\b/ {for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')
+ fi
+ if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
+ if hostname -I >/dev/null 2>&1; then
+ ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -Ev '^(127\.|0\.0\.0\.0)$' | head -n1)
+ fi
+ fi
+ if [ -n "$ip" ]; then
+ printf '%s (%s)' "$hn" "$ip"
+ else
+ printf '%s' "$hn"
+ fi
+}
+
 # ============================================
 # Ежедневный отчёт
 # ============================================
@@ -1384,7 +1406,7 @@ send_daily_report() {
  fi
 
  local message=" 📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ SSH МОНИТОРИНГА "$'\n'
- message="${message}🖥️ Сервер: $(hostname)"$'\n'
+ message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время отчета: ${current_time}"$'\n'
  message="${message}"$'\n'
  message="${message} 📈 СТАТИСТИКА ЗА ПОСЛЕДНИЕ 24 ЧАСА: "$'\n'
@@ -1464,7 +1486,7 @@ send_heartbeat() {
  timestamp_human=$(date '+%d.%m.%Y %H:%M:%S')
 
  local message=" ❤️ Heartbeat - скрипт мониторинга работает "$'\n'
- message="${message}🖥️ Сервер: $(hostname)"$'\n'
+ message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время: ${timestamp_human}"
 
  notify_send "$message"
@@ -1523,7 +1545,7 @@ send_startup_notification() {
 
  local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН "$'\n'
  message="${message}📌 Версия: ${SSH_MONITOR_VERSION:-?}"$'\n'
- message="${message}🖥️ Сервер: $(hostname)"$'\n'
+ message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время запуска: ${timestamp}"$'\n'
  message="${message}📊 Мониторинг SSH, SUDO и systemd-logind активирован"$'\n'
  message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд"$'\n'
@@ -1542,7 +1564,7 @@ send_shutdown_notification() {
  local timestamp
  timestamp=$(date '+%d.%m.%Y %H:%M:%S')
  local message=" ⚠️ СКРИПТ МОНИТОРИНГА ОСТАНОВЛЕН "$'\n'
- message="${message}🖥️ Сервер: $(hostname)"$'\n'
+ message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время остановки: ${timestamp}"
 
  notify_send "$message"
