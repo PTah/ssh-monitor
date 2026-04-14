@@ -214,3 +214,5 @@ sudo systemctl status ssh-monitor-watchdog.timer
 sudo systemctl list-timers | grep ssh-monitor-watchdog
 sudo journalctl -u ssh-monitor-watchdog.service -f
 ```
+
+**Ключевые темы (для поиска):** мониторинг **SSH** и **sshd**, **bash**-скрипт для **Linux**-сервера, уведомления в **Telegram** и по **SMTP** / электронной почте, **systemd-logind**, **sudo**, **journalctl**, **iptables** / **ip6tables**, автоматический **бан IP** и **whitelist**, **systemd** unit, **ежедневный отчёт**, **heartbeat**, **OpenSSH**, безопасность сервера, **Prometheus** textfile, опционально **watchdog** для сервиса.
