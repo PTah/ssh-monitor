@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.5.3"
+SSH_MONITOR_VERSION="0.9.5.4"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -613,21 +613,59 @@ send_zabbix_trapper() {
 
  ZABBIX_EVENT_SEQ=$((ZABBIX_EVENT_SEQ + 1))
 
- local tmp
- tmp="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.XXXXXX" 2>/dev/null)" || return 1
- {
- printf '%s\t%s\n' "$key_al" "$one_line"
- printf '%s\t%s\n' "$key_sq" "$ZABBIX_EVENT_SEQ"
- } >"$tmp" || {
+ local tmp tmp2 zerr alert_rc seq_rc
+ tmp="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.al.XXXXXX" 2>/dev/null)" || return 1
+ tmp2="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.sq.XXXXXX" 2>/dev/null)" || {
  rm -f "$tmp"
  return 1
  }
+ zerr="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.err.XXXXXX" 2>/dev/null)" || {
+ rm -f "$tmp" "$tmp2"
+ return 1
+ }
 
- if zabbix_sender -z "$ZABBIX_SERVER" -s "$ZABBIX_HOST_NAME" -i "$tmp" >/dev/null 2>&1; then
- rm -f "$tmp"
+ printf '%s\t%s\n' "$key_al" "$one_line" >"$tmp" || {
+ rm -f "$tmp" "$tmp2" "$zerr"
+ return 1
+ }
+ printf '%s\t%s\n' "$key_sq" "$ZABBIX_EVENT_SEQ" >"$tmp2" || {
+ rm -f "$tmp" "$tmp2" "$zerr"
+ return 1
+ }
+
+ alert_rc=1
+ seq_rc=1
+ local rc
+ if zabbix_sender -z "$ZABBIX_SERVER" -s "$ZABBIX_HOST_NAME" -i "$tmp" 2>"$zerr"; then
+ alert_rc=0
+ else
+ rc=$?
+ if [ -s "$zerr" ]; then
+ write_log "WARN: zabbix_sender alert (${key_al}): $(tr '\n\r' '  ' <"$zerr") (exit ${rc})"
+ else
+ write_log "WARN: zabbix_sender alert (${key_al}): stderr пуст, exit ${rc}"
+ fi
+ fi
+ : >"$zerr"
+ if zabbix_sender -z "$ZABBIX_SERVER" -s "$ZABBIX_HOST_NAME" -i "$tmp2" 2>"$zerr"; then
+ seq_rc=0
+ else
+ rc=$?
+ if [ -s "$zerr" ]; then
+ write_log "WARN: zabbix_sender seq (${key_sq}): $(tr '\n\r' '  ' <"$zerr") (exit ${rc})"
+ else
+ write_log "WARN: zabbix_sender seq (${key_sq}): stderr пуст, exit ${rc}"
+ fi
+ fi
+
+ rm -f "$tmp" "$tmp2" "$zerr"
+
+ # Раньше один файл с двумя строками: при failed по seq весь пакет считался неуспешным.
+ # Текст оповещения — основной результат; seq нужен для триггеров по изменению.
+ if [ "$alert_rc" -eq 0 ]; then
+ [ "$seq_rc" -ne 0 ] && write_log "WARN: в Zabbix ушёл только ${key_al}; проверьте item ${key_sq} (тип unsigned, trapper)"
  return 0
  fi
- rm -f "$tmp"
  return 1
 }
 
