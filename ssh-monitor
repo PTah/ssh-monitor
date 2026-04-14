@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.5.5"
+SSH_MONITOR_VERSION="0.9.5.6"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -593,25 +593,31 @@ PY
  return 1
 }
 
-# Одна порция входного файла для zabbix_sender -i. Весь вывод (stdout+stderr) уходит в zlog:
-# ответ сервера обычно в stdout; при ненулевом exit всё равно считаем успехом, если в тексте есть failed: 0;
-_sshmon_zbx_send_file() {
- local input_path="$1"
- local log_tag="$2"
- local zlog="$3"
+# zabbix_sender с произвольными аргументами (-i файл или -k/-o и т.д.). Весь вывод в zlog.
+# Успех только по ответу сервера failed: 0 (exit-код и строка «sent:» часто обманчивы).
+# Ошибка разбора входа: обычно есть «Sending failed.» — не путать с успехом.
+_sshmon_zbx_send() {
+ local log_tag="$1"
+ local zlog="$2"
+ shift 2
  [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ] || return 1
  : >"$zlog"
- if zabbix_sender -z "$ZABBIX_SERVER" -s "$ZABBIX_HOST_NAME" -i "$input_path" >"$zlog" 2>&1; then
- return 0
- fi
+ zabbix_sender -z "$ZABBIX_SERVER" -s "$ZABBIX_HOST_NAME" "$@" >"$zlog" 2>&1 || :
  local zrc=$?
+ if grep -Fq 'Sending failed.' "$zlog" 2>/dev/null; then
+ write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, $(tr '\n\r' '  ' <"$zlog")"
+ return 1
+ fi
  if grep -Eq 'failed:[[:space:]]*0[[:space:]]*;' "$zlog" 2>/dev/null; then
  return 0
  fi
  if [ -s "$zlog" ]; then
  write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, $(tr '\n\r' '  ' <"$zlog")"
+ if grep -Eq 'failed:[[:space:]]*[1-9][0-9]*[[:space:]]*;' "$zlog" 2>/dev/null; then
+ write_log "WARN: Zabbix отклонил значение (${log_tag}): имя хоста, ключ trapper, тип item, размер/кодировку значения."
+ fi
  else
- write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, вывод пуст (проверьте zabbix_sender в PATH, сеть до ${ZABBIX_SERVER} и права на ${input_path})"
+ write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, вывод пуст (PATH zabbix_sender, сеть до ${ZABBIX_SERVER})"
  fi
  return 1
 }
@@ -626,6 +632,8 @@ send_zabbix_trapper() {
  local key_sq="${ZABBIX_SEQ_KEY:-ssh.monitor.seq}"
  [ -n "$key_al" ] || key_al="ssh.monitor.alert"
  [ -n "$key_sq" ] || key_sq="ssh.monitor.seq"
+ key_al="$(printf '%s' "$key_al" | tr -d '\r')"
+ key_sq="$(printf '%s' "$key_sq" | tr -d '\r')"
 
  local one_line
  one_line="$(printf '%s' "$message" | tr '\n\r\t' '   ')"
@@ -636,36 +644,28 @@ send_zabbix_trapper() {
 
  ZABBIX_EVENT_SEQ=$((ZABBIX_EVENT_SEQ + 1))
 
- local tmp tmp2 zlog alert_rc seq_rc
+ local tmp zlog alert_rc seq_rc
  tmp="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.al.XXXXXX" 2>/dev/null)" || return 1
- tmp2="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.sq.XXXXXX" 2>/dev/null)" || {
- rm -f "$tmp"
- return 1
- }
  zlog="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.log.XXXXXX" 2>/dev/null)" || {
- rm -f "$tmp" "$tmp2"
+ rm -f "$tmp"
  return 1
  }
 
  printf '%s\t%s\n' "$key_al" "$one_line" >"$tmp" || {
- rm -f "$tmp" "$tmp2" "$zlog"
- return 1
- }
- printf '%s\t%s\n' "$key_sq" "$ZABBIX_EVENT_SEQ" >"$tmp2" || {
- rm -f "$tmp" "$tmp2" "$zlog"
+ rm -f "$tmp" "$zlog"
  return 1
  }
 
  alert_rc=1
  seq_rc=1
- if _sshmon_zbx_send_file "$tmp" "alert (${key_al})" "$zlog"; then
+ if _sshmon_zbx_send "alert (${key_al})" "$zlog" -i "$tmp"; then
  alert_rc=0
  fi
- if _sshmon_zbx_send_file "$tmp2" "seq (${key_sq})" "$zlog"; then
+ if _sshmon_zbx_send "seq (${key_sq})" "$zlog" -k "$key_sq" -o "${ZABBIX_EVENT_SEQ}"; then
  seq_rc=0
  fi
 
- rm -f "$tmp" "$tmp2" "$zlog"
+ rm -f "$tmp" "$zlog"
 
  # Раньше один файл с двумя строками: при failed по seq весь пакет считался неуспешным.
  # Текст оповещения — основной результат; seq нужен для триггеров по изменению.
