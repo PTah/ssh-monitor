@@ -1,2 +1,4 @@
 .DS_Store
 CalculatorApp/
+# Артефакты локальной сборки (релизные архивы грузятся в GitHub Releases, в git не коммитим)
+ssh-monitor-*.tar.gz

@@ -122,6 +122,16 @@ sudo bash ./ssh-monitor --dry-run
 bash -n ./ssh-monitor
 ```
 
+## Релизный архив
+
+Версия задаётся в скрипте переменной **`SSH_MONITOR_VERSION`** (текущая стабильная — **1.0.0**). Сборка tarball из текущего git-дерева:
+
+```bash
+make dist
+```
+
+Появится файл `ssh-monitor-<версия>.tar.gz` (через `git archive`). Готовые архивы для установки без клона репозитория прикладываются к [релизам на GitHub](https://github.com/PTah/ssh-monitor/releases).
+
 ## Автозапуск через systemd
 
 1. Скопируйте скрипт в постоянное место:
