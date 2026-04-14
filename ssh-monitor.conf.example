@@ -1,7 +1,7 @@
 TELEGRAM_BOT_TOKEN="replace_with_telegram_bot_token"
 TELEGRAM_CHAT_ID="replace_with_telegram_chat_id"
 
-# Резервный webhook, если все каналы из NOTIFY_CHAIN недоступны (JSON {"text":"..."}).
+# Резервный webhook, если ВСЕ каналы из NOTIFY_CHAIN не смогли доставить сообщение (JSON {"text":"..."}).
 # ВАЖНО: BACKUP_WEBHOOK_URL НЕ заменяет основной канал — без хотя бы одного из telegram/zabbix/email
 # скрипт сразу завершится с ошибкой в stderr: «Не настроен ни один канал отправки оповещений» (код 1),
 # в том числе при --check-config и --dry-run. Сначала настройте Telegram, Zabbix или SMTP ниже.
@@ -9,6 +9,8 @@ BACKUP_WEBHOOK_URL=""
 
 # --- Очередь оповещений (NOTIFY_ORDER) ---
 # CSV: telegram, zabbix, email (или сокращения tg, zbx, mail).
+# При каждом событии скрипт ПЫТАЕТСЯ ОТПРАВИТЬ ВО ВСЕ перечисленные каналы по порядку (не только в первый успешный).
+# Неудача одного канала не отменяет отправку в остальные; подробности — в LOG_FILE (WARN по каналам).
 #
 # Пустая строка NOTIFY_ORDER="" = авто: в цепочку NOTIFY_CHAIN попадают ТОЛЬКО реально настроенные каналы,
 # порядок по умолчанию: telegram → zabbix → email (см. критерии «настроен» в README, раздел про каналы).

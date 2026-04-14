@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.5.2"
+SSH_MONITOR_VERSION="0.9.5.3"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -291,7 +291,7 @@ is_email_configured() {
 }
 
 # Заполняет NOTIFY_CHAIN: при пустом NOTIFY_ORDER — только реально настроенные каналы (telegram → zabbix → email).
-# При непустом NOTIFY_ORDER — ровно указанная очередь (имена каналов), без добавления «лишних».
+# При непустом NOTIFY_ORDER — ровно указанный список (имена каналов), без добавления «лишних»; notify_send шлёт во ВСЕ каналы из списка.
 refresh_notify_chain() {
  NOTIFY_CHAIN=()
  local order_raw
@@ -470,7 +470,7 @@ write_log() {
 }
 
 # ============================================
-# УВЕДОМЛЕНИЯ: telegram / zabbix / email (каскад по NOTIFY_CHAIN)
+# УВЕДОМЛЕНИЯ: telegram / zabbix / email — по NOTIFY_CHAIN во все перечисленные каналы; BACKUP_WEBHOOK только если все неуспешны.
 # ============================================
 
 send_email_raw() {
@@ -638,33 +638,44 @@ notify_send() {
  return 0
  fi
 
+ local any_ok=0
  local ch
  for ch in "${NOTIFY_CHAIN[@]}"; do
  case "$ch" in
  telegram)
  if send_telegram_raw "$message"; then
- return 0
+ any_ok=1
+ else
+ write_log "WARN: канал telegram: не удалось отправить уведомление"
  fi
  ;;
  zabbix)
  if send_zabbix_trapper "$message"; then
- return 0
+ any_ok=1
+ else
+ write_log "WARN: канал zabbix: не удалось отправить (zabbix_sender, сеть, имя хоста/ключи в Zabbix)"
  fi
  ;;
  email)
  if send_email_raw "$message"; then
- return 0
+ any_ok=1
+ else
+ write_log "WARN: канал email: не удалось отправить уведомление"
  fi
  ;;
  esac
  done
 
- if send_backup_webhook_raw "$message"; then
- write_log "WARN: основные каналы недоступны, сообщение ушло в BACKUP_WEBHOOK_URL"
+ if [ "$any_ok" -eq 1 ]; then
  return 0
  fi
 
- write_log "WARN: не удалось доставить уведомление (каналы: $(notify_chain_human); BACKUP_WEBHOOK не задан или недоступен)"
+ if send_backup_webhook_raw "$message"; then
+ write_log "WARN: все каналы из NOTIFY_CHAIN недоступны, сообщение ушло в BACKUP_WEBHOOK_URL"
+ return 0
+ fi
+
+ write_log "WARN: не удалось доставить уведомление ни в один канал ($(notify_chain_human); BACKUP_WEBHOOK не задан или недоступен)"
  return 1
 }
 
@@ -1620,7 +1631,7 @@ send_startup_notification() {
  message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд"$'\n'
  message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей"$'\n'
  message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"$'\n'
- message="${message}📢 Каналы уведомлений (каскад): $(notify_chain_human)"
+ message="${message}📢 Каналы уведомлений (все по списку): $(notify_chain_human)"
 
  notify_send "$message"
  write_log "Скрипт мониторинга запущен (белый список: $whitelist_count записей)"
@@ -1678,7 +1689,7 @@ run_check_config() {
  printf 'Проверка конфигурации ssh-monitor\n'
  printf 'SSH_MONITOR_VERSION=%s\n' "${SSH_MONITOR_VERSION:-}"
  printf 'CONFIG_FILE=%s\n' "$CONFIG_FILE"
- printf 'NOTIFY_ORDER=%s (пусто = авто: только настроенные, порядок telegram,zabbix,email)\n' "${NOTIFY_ORDER:-}"
+ printf 'NOTIFY_ORDER=%s (пусто = авто: только настроенные; при событии — отправка во все каналы списка)\n' "${NOTIFY_ORDER:-}"
  printf 'NOTIFY_CHAIN (эффективная очередь)=%s\n' "$(notify_chain_human)"
  printf 'TELEGRAM: %s\n' "$([ -n "$TELEGRAM_BOT_TOKEN" ] && echo настроен || echo НЕ настроен)"
  printf 'BACKUP_WEBHOOK_URL: %s\n' "$([ -n "${BACKUP_WEBHOOK_URL:-}" ] && echo настроен || echo не задан)"
