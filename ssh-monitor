@@ -54,7 +54,7 @@ ENABLE_LOGIND_MONITOR=1
 LOGIND_NOTIFY_NEW=1
 LOGIND_NOTIFY_REMOVED=0
 LOGIND_NOTIFY_FAILED=1
-# 1 = не слать Telegram для новых сессий с типом ssh (уведомление уже идёт из monitor_ssh)
+# 1 = не слать дубль Telegram для SSH-сессий logind (Type=ssh или Service=*sshd*; см. logind_session_is_ssh_duplicate_for_notify)
 LOGIND_SKIP_REMOTE=1
 
 # Эксплуатация / health
@@ -952,11 +952,19 @@ monitor_ssh() {
 
  local ssh_logs=""
  if command -v journalctl >/dev/null 2>&1; then
- ssh_logs=$(journalctl -u ssh -u sshd --since="@${last_check}" --until="now" 2>/dev/null | grep -E "Accepted|Failed|Disconnected" || true)
+ # -u ssh и -u sshd вместе часто дают две одинаковые строки Accepted; _COMM=sshd — один поток.
+ ssh_logs=$(journalctl _COMM=sshd --since="@${last_check}" --until="now" 2>/dev/null | grep -E "Accepted|Failed|Disconnected" | sort -u || true)
+ if [ -z "$ssh_logs" ]; then
+ ssh_logs=$(journalctl -u sshd --since="@${last_check}" --until="now" 2>/dev/null | grep -E "Accepted|Failed|Disconnected" | sort -u || true)
+ fi
+ if [ -z "$ssh_logs" ]; then
+ ssh_logs=$(journalctl -u ssh --since="@${last_check}" --until="now" 2>/dev/null | grep -E "Accepted|Failed|Disconnected" | sort -u || true)
+ fi
  else
- ssh_logs=$(grep -E "sshd.*(Accepted|Failed|Disconnected)" /var/log/auth.log 2>/dev/null || true)
+ ssh_logs=$(grep -E "sshd.*(Accepted|Failed|Disconnected)" /var/log/auth.log 2>/dev/null | sort -u || true)
  fi
 
+ declare -A SSH_ACCEPT_NOTIFY_KEYS
  if [ -n "$ssh_logs" ]; then
  while IFS= read -r line; do
  [[ -z "$line" ]] && continue
@@ -965,6 +973,14 @@ monitor_ssh() {
  user=$(sed -nE 's/.* for ([^ ]+) from .*/\1/p' <<<"$line")
  ip="$(extract_ssh_client_ip "$line")"
  if [ -n "$user" ]; then
+ local dedupe_port dedupe_key
+ dedupe_port=$(sed -nE 's/.* from [^ ]+ port ([0-9]+).*/\1/p' <<<"$line")
+ dedupe_key="${user}|${ip:-}|${dedupe_port:-}"
+ if [[ -n "${SSH_ACCEPT_NOTIFY_KEYS[$dedupe_key]:-}" ]]; then
+ write_log "SSH Accepted: дубль в журнале (user=${user} ip=${ip:-} port=${dedupe_port:-?}), второе уведомление не отправляем"
+ continue
+ fi
+ SSH_ACCEPT_NOTIFY_KEYS[$dedupe_key]=1
  local message=" ✅ УСПЕШНОЕ SSH ПОДКЛЮЧЕНИЕ "$'\n'
  message="${message}👤 Пользователь: ${user}"$'\n'
  message="${message}🌐 IP адрес: ${ip:-local}"$'\n'
@@ -1196,14 +1212,32 @@ monitor_security_events() {
 # Локальные сессии (systemd-logind, journalctl)
 # ============================================
 
-logind_session_type() {
+# Возврат 0 = не слать Telegram по logind (дубль с monitor_ssh): Type=ssh или Service=*sshd*.
+# Пустой ответ loginctl — короткие повторы (гонка с journal).
+logind_session_is_ssh_duplicate_for_notify() {
  local sid="$1"
- [ -z "$sid" ] && echo "" && return 0
+ [ -z "$sid" ] && return 1
  if ! command -v loginctl >/dev/null 2>&1; then
- echo ""
+ return 1
+ fi
+ local attempt st svc svc_lc
+ for attempt in 1 2 3 4 5; do
+ local props
+ props=$(loginctl show-session "$sid" -p Type -p Service 2>/dev/null || true)
+ st=$(printf '%s\n' "$props" | sed -n 's/^Type=//p' | head -n1 | tr -d '[:space:]')
+ svc=$(printf '%s\n' "$props" | sed -n 's/^Service=//p' | head -n1 | tr -d '[:space:]')
+ svc_lc=$(printf '%s' "$svc" | tr '[:upper:]' '[:lower:]')
+ if [ "$st" = "ssh" ] || [[ "$svc_lc" == *sshd* ]]; then
  return 0
  fi
- loginctl show-session "$sid" -p Type 2>/dev/null | sed -n 's/^Type=//p' | tr -d '[:space:]'
+ if [ -n "$st" ] || [ -n "$svc" ]; then
+ return 1
+ fi
+ if [ "$attempt" -lt 5 ]; then
+ sleep 0.2
+ fi
+ done
+ return 1
 }
 
 parse_logind_new_session() {
@@ -1265,10 +1299,8 @@ monitor_logind() {
  local sid="" user=""
  if parse_logind_new_session "$line" sid user; then
  if [ "${LOGIND_SKIP_REMOTE:-1}" = "1" ] && [ -n "$sid" ]; then
- local st
- st=$(logind_session_type "$sid")
- if [ "$st" = "ssh" ]; then
- write_log "LOGIND: новая сессия (тип ssh, уведомление от ssh-monitor): ${line}"
+ if logind_session_is_ssh_duplicate_for_notify "$sid"; then
+ write_log "LOGIND: новая сессия (SSH уже в monitor_ssh, Telegram пропущен): ${line}"
  continue
  fi
  fi
