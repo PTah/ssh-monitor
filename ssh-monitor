@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.5.7"
+SSH_MONITOR_VERSION="0.9.5.8"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -22,6 +22,9 @@ ZABBIX_SERVER=""
 ZABBIX_HOST_NAME=""
 ZABBIX_ALERT_KEY="ssh.monitor.alert"
 ZABBIX_SEQ_KEY="ssh.monitor.seq"
+# Лимит UTF-8 байт для значения ssh.monitor.alert (Zabbix trapper «Character» ≈255 байт).
+# 0 = не урезать (item типа Text / большой лимит). По умолчанию 250 — влезает в Character.
+ZABBIX_ALERT_MAX_BYTES="250"
 
 # Почта (SMTP через python3). Нужны MAIL_SMTP_HOST, MAIL_FROM, MAIL_TO.
 MAIL_SMTP_HOST=""
@@ -157,6 +160,7 @@ load_config() {
  local cfg_zabbix_host_name="${ZABBIX_HOST_NAME:-}"
  local cfg_zabbix_alert_key="${ZABBIX_ALERT_KEY:-ssh.monitor.alert}"
  local cfg_zabbix_seq_key="${ZABBIX_SEQ_KEY:-ssh.monitor.seq}"
+ local cfg_zabbix_alert_max_bytes="${ZABBIX_ALERT_MAX_BYTES:-250}"
  local cfg_log_file="${LOG_FILE}"
  local cfg_last_heartbeat_file="${LAST_HEARTBEAT_FILE}"
  local cfg_last_report_file="${LAST_REPORT_FILE}"
@@ -210,6 +214,11 @@ load_config() {
  ZABBIX_HOST_NAME="$(trim_value "${ZABBIX_HOST_NAME:-$cfg_zabbix_host_name}")"
  ZABBIX_ALERT_KEY="$(trim_value "${ZABBIX_ALERT_KEY:-$cfg_zabbix_alert_key}")"
  ZABBIX_SEQ_KEY="$(trim_value "${ZABBIX_SEQ_KEY:-$cfg_zabbix_seq_key}")"
+ ZABBIX_ALERT_MAX_BYTES="$(trim_value "${ZABBIX_ALERT_MAX_BYTES:-$cfg_zabbix_alert_max_bytes}")"
+ if ! [[ "${ZABBIX_ALERT_MAX_BYTES:-250}" =~ ^[0-9]+$ ]]; then
+ printf 'WARN: ZABBIX_ALERT_MAX_BYTES="%s" не число, использую 250\n' "${ZABBIX_ALERT_MAX_BYTES:-}" >&2
+ ZABBIX_ALERT_MAX_BYTES=250
+ fi
  LOG_FILE="${LOG_FILE:-$cfg_log_file}"
  LAST_HEARTBEAT_FILE="${LAST_HEARTBEAT_FILE:-$cfg_last_heartbeat_file}"
  LAST_REPORT_FILE="${LAST_REPORT_FILE:-$cfg_last_report_file}"
@@ -614,12 +623,59 @@ _sshmon_zbx_send() {
  if [ -s "$zlog" ]; then
  write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, $(tr '\n\r' '  ' <"$zlog")"
  if grep -Eq 'failed:[[:space:]]*[1-9][0-9]*[[:space:]]*;' "$zlog" 2>/dev/null; then
- write_log "WARN: Zabbix отклонил значение (${log_tag}): имя хоста, ключ trapper, тип item, размер/кодировку значения."
+ write_log "WARN: Zabbix отклонил значение (${log_tag}): хост/ключ/тип item; длинный UTF-8 (эмодзи, кириллица) часто не влезает в trapper «Character» (~255 байт) — смените item на «Text» или задайте ZABBIX_ALERT_MAX_BYTES."
  fi
  else
  write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, вывод пуст (PATH zabbix_sender, сеть до ${ZABBIX_SERVER})"
  fi
  return 1
+}
+
+# Укладывает текст в лимит байт UTF-8 (Zabbix trapper «Character»). 0 = без усечения.
+_sshmon_zbx_truncate_alert_value() {
+ local text="$1"
+ local maxb="${ZABBIX_ALERT_MAX_BYTES:-250}"
+ case "$maxb" in
+ ''|*[!0-9]*) maxb=250 ;;
+ esac
+ if [ "$maxb" -eq 0 ]; then
+ printf '%s' "$text"
+ return 0
+ fi
+ if ! command -v python3 >/dev/null 2>&1; then
+ if [ "${#text}" -gt 100 ]; then
+ printf '%s …' "${text:0:100}"
+ else
+ printf '%s' "$text"
+ fi
+ return 0
+ fi
+ local out
+ out="$(printf '%s' "$text" | ZABBIX_ALERT_MAX_BYTES="$maxb" python3 -c '
+import os, sys
+maxb = int(os.environ["ZABBIX_ALERT_MAX_BYTES"])
+s = sys.stdin.read()
+if maxb <= 0:
+    sys.stdout.write(s)
+else:
+    b = s.encode("utf-8")
+    if len(b) <= maxb:
+        sys.stdout.write(s)
+    else:
+        b = b[:maxb]
+        while b and (b[-1] & 0xC0) == 0x80:
+            b = b[:-1]
+        sys.stdout.write(b.decode("utf-8"))
+' 2>/dev/null)" || out=""
+ if [ -z "$out" ]; then
+ if [ "${#text}" -gt 100 ]; then
+ printf '%s …' "${text:0:100}"
+ else
+ printf '%s' "$text"
+ fi
+ return 0
+ fi
+ printf '%s' "$out"
 }
 
 send_zabbix_trapper() {
@@ -642,6 +698,7 @@ send_zabbix_trapper() {
  if [ "${#one_line}" -gt "$max_len" ]; then
  one_line="${one_line:0:$max_len}..."
  fi
+ one_line="$(_sshmon_zbx_truncate_alert_value "$one_line")"
 
  ZABBIX_EVENT_SEQ=$((ZABBIX_EVENT_SEQ + 1))
 
@@ -1752,7 +1809,8 @@ run_check_config() {
  printf 'LOGIND_NOTIFY_NEW=%s LOGIND_NOTIFY_REMOVED=%s LOGIND_NOTIFY_FAILED=%s LOGIND_SKIP_REMOTE=%s\n' \
   "${LOGIND_NOTIFY_NEW:-}" "${LOGIND_NOTIFY_REMOVED:-}" "${LOGIND_NOTIFY_FAILED:-}" "${LOGIND_SKIP_REMOTE:-}"
  printf 'ZABBIX_SERVER=%s ZABBIX_HOST_NAME=%s\n' "${ZABBIX_SERVER:-}" "${ZABBIX_HOST_NAME:-}"
- printf 'ZABBIX_ALERT_KEY=%s ZABBIX_SEQ_KEY=%s\n' "${ZABBIX_ALERT_KEY:-}" "${ZABBIX_SEQ_KEY:-}"
+ printf 'ZABBIX_ALERT_KEY=%s ZABBIX_SEQ_KEY=%s ZABBIX_ALERT_MAX_BYTES=%s (0=без усечения)\n' \
+  "${ZABBIX_ALERT_KEY:-}" "${ZABBIX_SEQ_KEY:-}" "${ZABBIX_ALERT_MAX_BYTES:-250}"
  if [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ]; then
  if command -v zabbix_sender >/dev/null 2>&1; then
  printf 'zabbix_sender: найден (%s)\n' "$(command -v zabbix_sender)"

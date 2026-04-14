@@ -31,6 +31,9 @@ ZABBIX_SERVER=""
 ZABBIX_HOST_NAME=""
 ZABBIX_ALERT_KEY="ssh.monitor.alert"
 ZABBIX_SEQ_KEY="ssh.monitor.seq"
+# Макс. байт UTF-8 для значения trapper (по умолчанию 250 — типичный лимит «Character» в Zabbix).
+# Полные тексты как в Telegram — item ssh.monitor.alert лучше типа «Text», тогда можно ZABBIX_ALERT_MAX_BYTES="0".
+ZABBIX_ALERT_MAX_BYTES="250"
 
 # SMTP (python3). Для авто-режима почты нужны MAIL_SMTP_HOST, MAIL_FROM, MAIL_TO.
 MAIL_SMTP_HOST=""
