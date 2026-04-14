@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.7.0"
+SSH_MONITOR_VERSION="0.9.7.1"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -742,17 +742,23 @@ send_zabbix_trapper() {
  # UTF-8 в -o через python3 (argv) надёжнее, чем -i файл на части сборок zabbix_sender.
  if command -v python3 >/dev/null 2>&1; then
  : >"$zlog"
- printf '%s' "$one_line" | SSHMON_ZBX_TRAPPER_K="$key_al" SSHMON_ZBX_TRAPPER_LOG="$zlog" python3 -c '
-import os, subprocess, sys
+ # ZABBIX_* должны быть в окружении python3 (в bash без export они не видны в os.environ).
+ printf '%s' "$one_line" | ZABBIX_SERVER="$ZABBIX_SERVER" ZABBIX_HOST_NAME="$ZABBIX_HOST_NAME" \
+ SSHMON_ZBX_TRAPPER_K="$key_al" SSHMON_ZBX_TRAPPER_LOG="$zlog" python3 -c '
+import os, subprocess, sys, traceback
 val = sys.stdin.read()
 k = os.environ["SSHMON_ZBX_TRAPPER_K"]
 path = os.environ["SSHMON_ZBX_TRAPPER_LOG"]
-r = subprocess.run(
-    ["zabbix_sender", "-z", os.environ["ZABBIX_SERVER"],
-     "-s", os.environ["ZABBIX_HOST_NAME"], "-k", k, "-o", val],
-    capture_output=True, text=True)
+try:
+    r = subprocess.run(
+        ["zabbix_sender", "-z", os.environ["ZABBIX_SERVER"],
+         "-s", os.environ["ZABBIX_HOST_NAME"], "-k", k, "-o", val],
+        capture_output=True, text=True)
+    out = (r.stdout or "") + (r.stderr or "")
+except Exception:
+    out = "ssh-monitor python zabbix_sender: " + traceback.format_exc()
 with open(path, "w", encoding="utf-8", newline="\n") as fh:
-    fh.write((r.stdout or "") + (r.stderr or ""))
+    fh.write(out)
 ' || true
  if _sshmon_zbx_parse_sender_output "alert (${key_al})" "$zlog" 0; then
  alert_rc=0
