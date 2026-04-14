@@ -1522,14 +1522,14 @@ send_startup_notification() {
  local whitelist_count=$((${#WHITELIST_IPS[@]} + ${#WHITELIST_SUBNETS[@]}))
 
  local message=" ✅ СКРИПТ МОНИТОРИНГА ЗАПУЩЕН "$'\n'
+ message="${message}📌 Версия: ${SSH_MONITOR_VERSION:-?}"$'\n'
  message="${message}🖥️ Сервер: $(hostname)"$'\n'
  message="${message}🕐 Время запуска: ${timestamp}"$'\n'
  message="${message}📊 Мониторинг SSH, SUDO и systemd-logind активирован"$'\n'
  message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд"$'\n'
  message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей"$'\n'
  message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"$'\n'
- message="${message}📢 Каналы уведомлений (каскад): $(notify_chain_human)"$'\n'
- message="${message}📌 Версия: ${SSH_MONITOR_VERSION:-?}"
+ message="${message}📢 Каналы уведомлений (каскад): $(notify_chain_human)"
 
  notify_send "$message"
  write_log "Скрипт мониторинга запущен (белый список: $whitelist_count записей)"
