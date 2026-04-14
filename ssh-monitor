@@ -7,25 +7,15 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="0.9.7.1"
+SSH_MONITOR_VERSION="0.10.0.0"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
 BACKUP_WEBHOOK_URL=""
 
-# Очередь оповещений: CSV из имён telegram, zabbix, email (или tg, zbx, mail).
-# Пусто = авто: только настроенные каналы, порядок telegram → zabbix → email.
+# Очередь оповещений: CSV из имён telegram, email (или tg, mail).
+# Пусто = авто: только настроенные каналы, порядок telegram → email.
 NOTIFY_ORDER=""
-
-# Zabbix trapper (zabbix_sender). Пустой ZABBIX_SERVER — канал недоступен.
-ZABBIX_SERVER=""
-ZABBIX_HOST_NAME=""
-ZABBIX_ALERT_KEY="ssh.monitor.alert"
-ZABBIX_SEQ_KEY="ssh.monitor.seq"
-# Лимит UTF-8 байт для значения ssh.monitor.alert (0 = не урезать). Для короткого plain-текста в Zabbix обычно 0.
-ZABBIX_ALERT_MAX_BYTES="0"
-# Файл последнего ssh.monitor.seq (число), чтобы после перезапуска счётчик не сбрасывался в 1.
-ZABBIX_SEQ_STATE_FILE="/var/log/ssh_monitor_zabbix_seq"
 
 # Почта (SMTP через python3). Нужны MAIL_SMTP_HOST, MAIL_FROM, MAIL_TO.
 MAIL_SMTP_HOST=""
@@ -46,7 +36,7 @@ DAILY_REPORT_TOP_IPS=5
 # Пусто = календарь и час отчёта в зоне процесса (как `date`, обычно совпадает с /etc/localtime).
 # Иначе IANA, например Europe/Moscow — явная зона для DAILY_REPORT_HOUR и даты «сегодня» в отчёте.
 DAILY_REPORT_TZ=""
-# IANA-зона для строк «🕐 Время» в Telegram/Zabbix/email. Пусто = тогда DAILY_REPORT_TZ, если она задана, иначе зона процесса (часто UTC у systemd — см. README).
+# IANA-зона для строк «🕐 Время» в Telegram/email. Пусто = тогда DAILY_REPORT_TZ, если она задана, иначе зона процесса (часто UTC у systemd — см. README).
 NOTIFY_TZ=""
 # Не слать повтор «Accepted» для той же пары user+IP чаще, чем раз в N секунд (разные port в журнале — один вход).
 SSH_ACCEPT_NOTIFY_DEDUP_SEC=5
@@ -99,7 +89,6 @@ CHECK_CONFIG_ONLY=0
 DRY_RUN=0
 # Защита от двойного вызова: при SIGTERM срабатывает trap TERM, затем при выходе — trap EXIT
 SHUTDOWN_NOTIFIED=0
-ZABBIX_EVENT_SEQ=0
 declare -a NOTIFY_CHAIN=()
 
 trim_value() {
@@ -157,12 +146,6 @@ load_config() {
  local cfg_telegram_bot_token="${TELEGRAM_BOT_TOKEN}"
  local cfg_telegram_chat_id="${TELEGRAM_CHAT_ID}"
  local cfg_backup_webhook_url="${BACKUP_WEBHOOK_URL}"
- local cfg_zabbix_server="${ZABBIX_SERVER:-}"
- local cfg_zabbix_host_name="${ZABBIX_HOST_NAME:-}"
- local cfg_zabbix_alert_key="${ZABBIX_ALERT_KEY:-ssh.monitor.alert}"
- local cfg_zabbix_seq_key="${ZABBIX_SEQ_KEY:-ssh.monitor.seq}"
- local cfg_zabbix_alert_max_bytes="${ZABBIX_ALERT_MAX_BYTES:-0}"
- local cfg_zabbix_seq_state_file="${ZABBIX_SEQ_STATE_FILE:-/var/log/ssh_monitor_zabbix_seq}"
  local cfg_log_file="${LOG_FILE}"
  local cfg_last_heartbeat_file="${LAST_HEARTBEAT_FILE}"
  local cfg_last_report_file="${LAST_REPORT_FILE}"
@@ -212,16 +195,6 @@ load_config() {
  TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-$cfg_telegram_bot_token}"
  TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-$cfg_telegram_chat_id}"
  BACKUP_WEBHOOK_URL="${BACKUP_WEBHOOK_URL:-$cfg_backup_webhook_url}"
- ZABBIX_SERVER="$(trim_value "${ZABBIX_SERVER:-$cfg_zabbix_server}")"
- ZABBIX_HOST_NAME="$(trim_value "${ZABBIX_HOST_NAME:-$cfg_zabbix_host_name}")"
- ZABBIX_ALERT_KEY="$(trim_value "${ZABBIX_ALERT_KEY:-$cfg_zabbix_alert_key}")"
- ZABBIX_SEQ_KEY="$(trim_value "${ZABBIX_SEQ_KEY:-$cfg_zabbix_seq_key}")"
- ZABBIX_ALERT_MAX_BYTES="$(trim_value "${ZABBIX_ALERT_MAX_BYTES:-$cfg_zabbix_alert_max_bytes}")"
- if ! [[ "${ZABBIX_ALERT_MAX_BYTES:-0}" =~ ^[0-9]+$ ]]; then
- printf 'WARN: ZABBIX_ALERT_MAX_BYTES="%s" не число, использую 0\n' "${ZABBIX_ALERT_MAX_BYTES:-}" >&2
- ZABBIX_ALERT_MAX_BYTES=0
- fi
- ZABBIX_SEQ_STATE_FILE="$(trim_value "${ZABBIX_SEQ_STATE_FILE:-$cfg_zabbix_seq_state_file}")"
  LOG_FILE="${LOG_FILE:-$cfg_log_file}"
  LAST_HEARTBEAT_FILE="${LAST_HEARTBEAT_FILE:-$cfg_last_heartbeat_file}"
  LAST_REPORT_FILE="${LAST_REPORT_FILE:-$cfg_last_report_file}"
@@ -268,8 +241,6 @@ load_config() {
  MAIL_TO="$(trim_value "${MAIL_TO:-$cfg_mail_to}")"
  MAIL_SMTP_STARTTLS="${MAIL_SMTP_STARTTLS:-$cfg_mail_smtp_starttls}"
  MAIL_SMTP_SSL="${MAIL_SMTP_SSL:-$cfg_mail_smtp_ssl}"
-
- _sshmon_zbx_load_seq_state
 }
 
 # Дата/время для ежедневного отчёта (час DAILY_REPORT_HOUR и «сегодня» в LAST_REPORT_FILE).
@@ -296,15 +267,11 @@ is_telegram_configured() {
  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]
 }
 
-is_zabbix_configured() {
- [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ] && command -v zabbix_sender >/dev/null 2>&1
-}
-
 is_email_configured() {
  [ -n "${MAIL_SMTP_HOST:-}" ] && [ -n "${MAIL_FROM:-}" ] && [ -n "${MAIL_TO:-}" ] && command -v python3 >/dev/null 2>&1
 }
 
-# Заполняет NOTIFY_CHAIN: при пустом NOTIFY_ORDER — только реально настроенные каналы (telegram → zabbix → email).
+# Заполняет NOTIFY_CHAIN: при пустом NOTIFY_ORDER — только реально настроенные каналы (telegram → email).
 # При непустом NOTIFY_ORDER — ровно указанный список (имена каналов), без добавления «лишних»; notify_send шлёт во ВСЕ каналы из списка.
 refresh_notify_chain() {
  NOTIFY_CHAIN=()
@@ -314,9 +281,6 @@ refresh_notify_chain() {
  if [ -z "$order_raw" ]; then
  if is_telegram_configured; then
  NOTIFY_CHAIN+=(telegram)
- fi
- if is_zabbix_configured; then
- NOTIFY_CHAIN+=(zabbix)
  fi
  if is_email_configured; then
  NOTIFY_CHAIN+=(email)
@@ -331,7 +295,6 @@ refresh_notify_chain() {
  norm="${tok,,}"
  case "$norm" in
  telegram | tg) NOTIFY_CHAIN+=(telegram) ;;
- zabbix | zbx) NOTIFY_CHAIN+=(zabbix) ;;
  email | mail) NOTIFY_CHAIN+=(email) ;;
  *)
  printf 'WARN: NOTIFY_ORDER: неизвестный токен «%s», пропускаю\n' "$tok" >&2
@@ -484,7 +447,7 @@ write_log() {
 }
 
 # ============================================
-# УВЕДОМЛЕНИЯ: telegram / zabbix / email — по NOTIFY_CHAIN во все перечисленные каналы; BACKUP_WEBHOOK только если все неуспешны.
+# УВЕДОМЛЕНИЯ: telegram / email — по NOTIFY_CHAIN во все перечисленные каналы; BACKUP_WEBHOOK только если все неуспешны.
 # ============================================
 
 send_email_raw() {
@@ -607,201 +570,10 @@ PY
  return 1
 }
 
-# Восстановить счётчик seq из файла (после перезапуска не начинать с 1).
-_sshmon_zbx_load_seq_state() {
- [ -z "${ZABBIX_SEQ_STATE_FILE:-}" ] && return 0
- [ ! -f "$ZABBIX_SEQ_STATE_FILE" ] && return 0
- local s
- s="$(tr -d ' \t\r\n' <"$ZABBIX_SEQ_STATE_FILE" 2>/dev/null || true)"
- if [[ "$s" =~ ^[0-9]+$ ]] && [ "$s" -ge "${ZABBIX_EVENT_SEQ:-0}" ]; then
- ZABBIX_EVENT_SEQ="$s"
- fi
-}
-
-_sshmon_zbx_save_seq_state() {
- [ -z "${ZABBIX_SEQ_STATE_FILE:-}" ] && return 0
- local d
- d="$(dirname "$ZABBIX_SEQ_STATE_FILE")"
- mkdir -p "$d" 2>/dev/null || true
- printf '%s\n' "${ZABBIX_EVENT_SEQ:-0}" >"${ZABBIX_SEQ_STATE_FILE}.tmp" 2>/dev/null || return 0
- mv -f "${ZABBIX_SEQ_STATE_FILE}.tmp" "$ZABBIX_SEQ_STATE_FILE" 2>/dev/null || true
-}
-
-# Разбор вывода zabbix_sender (stdout+stderr в zlog).
-_sshmon_zbx_parse_sender_output() {
- local log_tag="$1"
- local zlog="$2"
- local zrc="${3:-0}"
- if grep -Fq 'Sending failed.' "$zlog" 2>/dev/null; then
- write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, $(tr '\n\r' '  ' <"$zlog")"
- return 1
- fi
- if grep -Eq 'failed:[[:space:]]*0[[:space:]]*;' "$zlog" 2>/dev/null; then
- return 0
- fi
- if [ -s "$zlog" ]; then
- write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, $(tr '\n\r' '  ' <"$zlog")"
- if grep -Eq 'failed:[[:space:]]*[1-9][0-9]*[[:space:]]*;' "$zlog" 2>/dev/null; then
- write_log "WARN: Zabbix отклонил значение (${log_tag}): хост, ключ trapper, тип item, препроцессинг или лимит; для длинных текстов — ZABBIX_ALERT_MAX_BYTES."
- fi
- else
- write_log "WARN: zabbix_sender ${log_tag}: exit ${zrc}, вывод пуст (PATH zabbix_sender, сеть до ${ZABBIX_SERVER})"
- fi
- return 1
-}
-
-# zabbix_sender с произвольными аргументами (-i файл или -k/-o и т.д.). Весь вывод в zlog.
-# Успех только по ответу сервера failed: 0 (exit-код и строка «sent:» часто обманчивы).
-_sshmon_zbx_send() {
- local log_tag="$1"
- local zlog="$2"
- shift 2
- [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ] || return 1
- : >"$zlog"
- zabbix_sender -z "$ZABBIX_SERVER" -s "$ZABBIX_HOST_NAME" "$@" >"$zlog" 2>&1 || :
- local zrc=$?
- _sshmon_zbx_parse_sender_output "$log_tag" "$zlog" "$zrc"
-}
-
-# Укладывает текст в лимит байт UTF-8 (Zabbix trapper «Character»). 0 = без усечения.
-_sshmon_zbx_truncate_alert_value() {
- local text="$1"
- local maxb="${ZABBIX_ALERT_MAX_BYTES:-0}"
- case "$maxb" in
- ''|*[!0-9]*) maxb=0 ;;
- esac
- if [ "$maxb" -eq 0 ]; then
- printf '%s' "$text"
- return 0
- fi
- if ! command -v python3 >/dev/null 2>&1; then
- if [ "${#text}" -gt 100 ]; then
- printf '%s …' "${text:0:100}"
- else
- printf '%s' "$text"
- fi
- return 0
- fi
- local out
- out="$(printf '%s' "$text" | ZABBIX_ALERT_MAX_BYTES="$maxb" python3 -c '
-import os, sys
-maxb = int(os.environ["ZABBIX_ALERT_MAX_BYTES"])
-s = sys.stdin.read()
-if maxb <= 0:
-    sys.stdout.write(s)
-else:
-    b = s.encode("utf-8")
-    if len(b) <= maxb:
-        sys.stdout.write(s)
-    else:
-        b = b[:maxb]
-        while b and (b[-1] & 0xC0) == 0x80:
-            b = b[:-1]
-        sys.stdout.write(b.decode("utf-8"))
-' 2>/dev/null)" || out=""
- if [ -z "$out" ]; then
- if [ "${#text}" -gt 100 ]; then
- printf '%s …' "${text:0:100}"
- else
- printf '%s' "$text"
- fi
- return 0
- fi
- printf '%s' "$out"
-}
-
-send_zabbix_trapper() {
- local message="${1:-}"
- [ -n "$message" ] || return 1
- [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ] || return 1
- command -v zabbix_sender >/dev/null 2>&1 || return 1
-
- local key_al="${ZABBIX_ALERT_KEY:-ssh.monitor.alert}"
- local key_sq="${ZABBIX_SEQ_KEY:-ssh.monitor.seq}"
- [ -n "$key_al" ] || key_al="ssh.monitor.alert"
- [ -n "$key_sq" ] || key_sq="ssh.monitor.seq"
- key_al="$(printf '%s' "$key_al" | tr -d '\r')"
- key_sq="$(printf '%s' "$key_sq" | tr -d '\r')"
-
- local one_line
- # NUL в значении обрезает файл у первого \0 — Zabbix часто отвечает failed: 1
- one_line="$(printf '%s' "$message" | tr -d '\000' | tr '\n\r\t' '   ')"
- local max_len=60000
- if [ "${#one_line}" -gt "$max_len" ]; then
- one_line="${one_line:0:$max_len}..."
- fi
- one_line="$(_sshmon_zbx_truncate_alert_value "$one_line")"
-
- ZABBIX_EVENT_SEQ=$((ZABBIX_EVENT_SEQ + 1))
-
- local zlog alert_rc seq_rc tmp=""
- zlog="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.log.XXXXXX" 2>/dev/null)" || return 1
-
- alert_rc=1
- seq_rc=1
- # UTF-8 в -o через python3 (argv) надёжнее, чем -i файл на части сборок zabbix_sender.
- if command -v python3 >/dev/null 2>&1; then
- : >"$zlog"
- # ZABBIX_* должны быть в окружении python3 (в bash без export они не видны в os.environ).
- printf '%s' "$one_line" | ZABBIX_SERVER="$ZABBIX_SERVER" ZABBIX_HOST_NAME="$ZABBIX_HOST_NAME" \
- SSHMON_ZBX_TRAPPER_K="$key_al" SSHMON_ZBX_TRAPPER_LOG="$zlog" python3 -c '
-import os, subprocess, sys, traceback
-val = sys.stdin.read()
-k = os.environ["SSHMON_ZBX_TRAPPER_K"]
-path = os.environ["SSHMON_ZBX_TRAPPER_LOG"]
-try:
-    r = subprocess.run(
-        ["zabbix_sender", "-z", os.environ["ZABBIX_SERVER"],
-         "-s", os.environ["ZABBIX_HOST_NAME"], "-k", k, "-o", val],
-        capture_output=True, text=True)
-    out = (r.stdout or "") + (r.stderr or "")
-except Exception:
-    out = "ssh-monitor python zabbix_sender: " + traceback.format_exc()
-with open(path, "w", encoding="utf-8", newline="\n") as fh:
-    fh.write(out)
-' || true
- if _sshmon_zbx_parse_sender_output "alert (${key_al})" "$zlog" 0; then
- alert_rc=0
- fi
- else
- tmp="$(mktemp "${TMPDIR:-/tmp}/ssh-monitor.zbx.al.XXXXXX" 2>/dev/null)" || {
- rm -f "$zlog"
- return 1
- }
- printf '%s\t%s\n' "$key_al" "$one_line" >"$tmp" || {
- rm -f "$tmp" "$zlog"
- return 1
- }
- if _sshmon_zbx_send "alert (${key_al})" "$zlog" -i "$tmp"; then
- alert_rc=0
- fi
- rm -f "$tmp"
- fi
-
- if _sshmon_zbx_send "seq (${key_sq})" "$zlog" -k "$key_sq" -o "${ZABBIX_EVENT_SEQ}"; then
- seq_rc=0
- fi
-
- rm -f "$zlog"
- _sshmon_zbx_save_seq_state
-
- # Раньше один файл с двумя строками: при failed по seq весь пакет считался неуспешным.
- # Текст оповещения — основной результат; seq нужен для триггеров по изменению.
- if [ "$alert_rc" -eq 0 ]; then
- [ "$seq_rc" -ne 0 ] && write_log "WARN: в Zabbix ушёл только ${key_al}; проверьте item ${key_sq} (тип unsigned, trapper)"
- return 0
- fi
- return 1
-}
-
 notify_send() {
  local message="$1"
- local zabbix_plain="${2:-}"
  if [ "${DRY_RUN:-0}" = "1" ]; then
  printf '[DRY-RUN notify] %s\n' "$(printf '%s' "$message" | tr '\n' ' ')" >&2
- if [ -n "$zabbix_plain" ]; then
- printf '[DRY-RUN notify] zabbix (plain): %s\n' "$(printf '%s' "$zabbix_plain" | tr '\n' ' ')" >&2
- fi
  return 0
  fi
 
@@ -814,13 +586,6 @@ notify_send() {
  any_ok=1
  else
  write_log "WARN: канал telegram: не удалось отправить уведомление"
- fi
- ;;
- zabbix)
- if send_zabbix_trapper "${zabbix_plain:-$message}"; then
- any_ok=1
- else
- write_log "WARN: канал zabbix: не удалось отправить (zabbix_sender, сеть, имя хоста/ключи в Zabbix)"
  fi
  ;;
  email)
@@ -1004,8 +769,7 @@ block_ip() {
  message="${message}📊 Неудачных попыток: ${attempts}"$'\n'
  message="${message}⏱️ Блокировка на: ${ban_time_hours} час(ов)"$'\n'
  message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_ban="IP заблокирован: $(server_display_name_with_ip), адрес ${ip}, неудачных попыток ${attempts}, блок ${ban_time_hours} ч."
- notify_send "$message" "$zbx_ban"
+ notify_send "$message"
  write_log "AUTO-BAN: IP $ip заблокирован на $ban_time_hours часов ($attempts попыток)"
 }
 
@@ -1030,8 +794,7 @@ unblock_expired_ips() {
  local message=" 🔓 IP РАЗБЛОКИРОВАН "$'\n'
  message="${message}🌐 IP: ${ip}"$'\n'
  message="${message}🕐 Время разблокировки: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_un="IP разблокирован: $(server_display_name_with_ip), адрес ${ip}"
- notify_send "$message" "$zbx_un"
+ notify_send "$message"
 
  unblocked=$((unblocked + 1))
  fi
@@ -1202,15 +965,13 @@ monitor_ssh() {
  message="${message}👤 Пользователь: ${user}"$'\n'
  message="${message}🌐 IP адрес: ${ip:-local}"$'\n'
  message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_ssh="Новый SSH-вход: $(server_display_name_with_ip), пользователь ${user}, адрес ${ip:-local}"
- notify_send "$message" "$zbx_ssh"
+ notify_send "$message"
  write_log "SSH успешный вход: $user с IP ${ip:-local}"
  if [ "$user" = "root" ]; then
  local rmsg=" 🔑 SSH ВХОД ПОД ROOT "$'\n'
  rmsg="${rmsg}🌐 IP: ${ip:-local}"$'\n'
  rmsg="${rmsg}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_root="Новый SSH-вход под root: $(server_display_name_with_ip), адрес ${ip:-local}"
- notify_send "$rmsg" "$zbx_root"
+ notify_send "$rmsg"
  fi
  fi
  elif echo "$line" | grep -q "Failed password"; then
@@ -1239,8 +1000,7 @@ monitor_ssh() {
  message="${message}🌐 IP адрес: ${ip}"$'\n'
  message="${message}📊 Попытка ${current_attempts} из ${MAX_ATTEMPTS}"$'\n'
  message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_fail="Неудачный SSH: $(server_display_name_with_ip), пользователь ${user}, адрес ${ip}, попытка ${current_attempts} из ${MAX_ATTEMPTS}"
- notify_send "$message" "$zbx_fail"
+ notify_send "$message"
  fi
  write_log "SSH неудачная попытка: $user с IP $ip (попытка $current_attempts из $MAX_ATTEMPTS)"
  fi
@@ -1355,15 +1115,7 @@ monitor_sudo() {
  message="${message}💻 Команда: ${sudo_cmd}"$'\n'
  message="${message}📁 Директория: ${pwd:-unknown}"$'\n'
  message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local cmdz="${sudo_cmd}"
- if [ "${#cmdz}" -gt 200 ]; then
- cmdz="${cmdz:0:200}…"
- fi
- local zbx_sudo="Повышение привилегий (sudo): $(server_display_name_with_ip), пользователь ${user}, команда: ${cmdz}"
- if [ -n "${run_as:-}" ]; then
- zbx_sudo="${zbx_sudo}, от имени ${run_as}"
- fi
- notify_send "$message" "$zbx_sudo"
+ notify_send "$message"
  write_log "SUDO: $user выполнил $sudo_cmd${run_as:+ (USER=$run_as)}"
  fi
  done <<<"$sudo_logs"
@@ -1404,8 +1156,7 @@ monitor_security_events() {
  local m=" 🔐 ВНИМАНИЕ: изменение SSH host key / MITM? "$'\n'
  m="${m}$(printf '%s\n' "$hk")"
  m="${m}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_hk="SSH host key / MITM: $(server_display_name_with_ip), см. журнал"
- notify_send "$m" "$zbx_hk"
+ notify_send "$m"
  write_log "SECURITY: обнаружено сообщение об изменении host key"
  fi
  fi
@@ -1426,8 +1177,7 @@ monitor_security_events() {
  bm="${bm}🌐 IP: ${ip}"$'\n'
  bm="${bm}📊 Неудачных попыток за ~${BRUTE_WINDOW_SEC}s: ${count}"$'\n'
  bm="${bm}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_br="SSH брутфорс: $(server_display_name_with_ip), IP ${ip}, попыток ~${count} за ${BRUTE_WINDOW_SEC}s"
- notify_send "$bm" "$zbx_br"
+ notify_send "$bm"
  write_log "SECURITY: массовый брутфорс? IP=$ip fails=${count} за окно ${BRUTE_WINDOW_SEC}s"
  fi
  fi
@@ -1538,8 +1288,7 @@ monitor_logind() {
  msg="${msg}👤 Пользователь: ${user:-неизвестно}"$'\n'
  msg="${msg}🆔 Сессия: ${sid:-?}"$'\n'
  msg="${msg}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_ln="Сессия logind: $(server_display_name_with_ip), пользователь ${user:-?}, sid ${sid:-?}"
- notify_send "$msg" "$zbx_ln"
+ notify_send "$msg"
  write_log "LOGIND: новая сессия: ${line}"
  else
  write_log "LOGIND: новая сессия (разбор user/sid не удался): ${line}"
@@ -1556,8 +1305,7 @@ monitor_logind() {
  local msg_r=" 🚪 СЕССИЯ ЗАКРЫТА (systemd-logind) "$'\n'
  msg_r="${msg_r}🆔 Сессия: ${sess_r:-?}"$'\n'
  msg_r="${msg_r}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local zbx_lr="Сессия закрыта (logind): $(server_display_name_with_ip), sid ${sess_r:-?}"
- notify_send "$msg_r" "$zbx_lr"
+ notify_send "$msg_r"
  fi
 
  elif [[ "$low" == *"failed"* ]]; then
@@ -1565,12 +1313,7 @@ monitor_logind() {
  local msg_f=" ❌ СБОЙ (systemd-logind) "$'\n'
  msg_f="${msg_f}📝 ${line}"$'\n'
  msg_f="${msg_f}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- local ln_f="$line"
- if [ "${#ln_f}" -gt 180 ]; then
- ln_f="${ln_f:0:180}…"
- fi
- local zbx_lf="Сбой logind: $(server_display_name_with_ip), ${ln_f}"
- notify_send "$msg_f" "$zbx_lf"
+ notify_send "$msg_f"
  write_log "LOGIND: сбой: $line"
  fi
  fi
@@ -1699,8 +1442,7 @@ send_daily_report() {
  message="${message} Нет активных пользователей"$'\n'
  fi
 
- local zbx_rep="Отчет ssh-monitor 24h: $(server_display_name_with_ip), ok=${successful_logins:-0} fail=${failed_logins:-0} sudo=${sudo_commands:-0} bans=${active_bans}"
- notify_send "$message" "$zbx_rep"
+ notify_send "$message"
  write_log "Ежедневный отчет отправлен"
 
  echo "$(report_date '+%F')" >"$LAST_REPORT_FILE"
@@ -1759,8 +1501,7 @@ send_heartbeat() {
  message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время: ${timestamp_human}"
 
- local zbx_hb="Heartbeat ssh-monitor: $(server_display_name_with_ip)"
- notify_send "$message" "$zbx_hb"
+ notify_send "$message"
  echo "$timestamp" >"$LAST_HEARTBEAT_FILE"
  write_log "Heartbeat отправлен"
 }
@@ -1824,8 +1565,7 @@ send_startup_notification() {
  message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"$'\n'
  message="${message}📢 Каналы уведомлений (все по списку): $(notify_chain_human)"
 
- local zbx_su="Старт ssh-monitor v${SSH_MONITOR_VERSION:-?}: $(server_display_name_with_ip), whitelist=${whitelist_count}"
- notify_send "$message" "$zbx_su"
+ notify_send "$message"
  write_log "Скрипт мониторинга запущен (белый список: $whitelist_count записей)"
 }
 
@@ -1839,8 +1579,7 @@ send_shutdown_notification() {
  message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время остановки: ${timestamp}"
 
- local zbx_sd="Стоп ssh-monitor: $(server_display_name_with_ip)"
- notify_send "$message" "$zbx_sd"
+ notify_send "$message"
  write_log "Скрипт мониторинга остановлен"
 }
 
@@ -1898,16 +1637,6 @@ run_check_config() {
  printf 'ENABLE_LOGIND_MONITOR=%s LAST_LOGIND_CHECK_FILE=%s\n' "${ENABLE_LOGIND_MONITOR:-}" "${LAST_LOGIND_CHECK_FILE:-}"
  printf 'LOGIND_NOTIFY_NEW=%s LOGIND_NOTIFY_REMOVED=%s LOGIND_NOTIFY_FAILED=%s LOGIND_SKIP_REMOTE=%s\n' \
   "${LOGIND_NOTIFY_NEW:-}" "${LOGIND_NOTIFY_REMOVED:-}" "${LOGIND_NOTIFY_FAILED:-}" "${LOGIND_SKIP_REMOTE:-}"
- printf 'ZABBIX_SERVER=%s ZABBIX_HOST_NAME=%s\n' "${ZABBIX_SERVER:-}" "${ZABBIX_HOST_NAME:-}"
- printf 'ZABBIX_ALERT_KEY=%s ZABBIX_SEQ_KEY=%s ZABBIX_ALERT_MAX_BYTES=%s ZABBIX_SEQ_STATE_FILE=%s\n' \
-  "${ZABBIX_ALERT_KEY:-}" "${ZABBIX_SEQ_KEY:-}" "${ZABBIX_ALERT_MAX_BYTES:-0}" "${ZABBIX_SEQ_STATE_FILE:-}"
- if [ -n "${ZABBIX_SERVER:-}" ] && [ -n "${ZABBIX_HOST_NAME:-}" ]; then
- if command -v zabbix_sender >/dev/null 2>&1; then
- printf 'zabbix_sender: найден (%s)\n' "$(command -v zabbix_sender)"
- else
- printf 'zabbix_sender: НЕ найден в PATH\n' >&2
- fi
- fi
  printf 'MAIL_SMTP: host=%s port=%s from=%s to=%s STARTTLS=%s SSL=%s\n' \
   "${MAIL_SMTP_HOST:-}" "${MAIL_SMTP_PORT:-}" "${MAIL_FROM:-}" "${MAIL_TO:-}" \
   "${MAIL_SMTP_STARTTLS:-}" "${MAIL_SMTP_SSL:-}"
