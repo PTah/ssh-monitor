@@ -32,6 +32,7 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 - `BRUTE_WINDOW_SEC`, `BRUTE_MIN_FAILS`, `BRUTE_NOTIFY_COOLDOWN_SEC`
 - `PROMETHEUS_TEXTFILE_DIR` — каталог для `ssh_monitor.prom` (совместимость с node_exporter textfile collector)
 - `HEALTHCHECK_STATUS_FILE` — путь к JSON-файлу с меткой последней итерации цикла
+- `ENABLE_IP_BAN` — `1` (по умолчанию): мониторинг и автобан через ipset; `0`: только мониторинг и уведомления (без ipset/бана)
 - `BAN_TIME`, `MAX_ATTEMPTS`, `BAN_CHECK_INTERVAL`, `MONITOR_INTERVAL`
 - `WHITELIST_IPS`, `WHITELIST_SUBNETS` (CSV, например `ip1,ip2`)
 - `WATCHDOG_MAX_HEARTBEAT_AGE`, `WATCHDOG_LOG_FILE`, `WATCHDOG_SERVICE_NAME`, `WATCHDOG_NOTIFY_ON_RECOVERY`
@@ -68,7 +69,8 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 - `BRUTE_NOTIFY_COOLDOWN_SEC` — пауза между повторными уведомлениями по одному и тому же IP.
 - `PROMETHEUS_TEXTFILE_DIR` — если задан существующий каталог, на каждой итерации пишется `ssh_monitor.prom` с метрикой `ssh_monitor_last_loop_unixtime`.
 - `HEALTHCHECK_STATUS_FILE` — если задан, на каждой итерации обновляется JSON `{ "ts", "hostname", "dry_run" }`.
-- `BAN_TIME` — длительность бана IP в секундах.
+- `ENABLE_IP_BAN` — включить автобан IP (`1`) или работать только как монитор с уведомлениями (`0`; **ipset** не требуется).
+- `BAN_TIME` — длительность бана IP в секундах (используется при `ENABLE_IP_BAN=1`).
 - `MAX_ATTEMPTS` — число неудачных SSH-попыток до автоматического бана.
 - `BAN_CHECK_INTERVAL` — интервал проверки просроченных банов и аудита согласованности бан-листа с firewall (секунды).
 - `MONITOR_INTERVAL` — пауза между итерациями основного цикла мониторинга (секунды).

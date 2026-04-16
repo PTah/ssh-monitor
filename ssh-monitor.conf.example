@@ -44,6 +44,9 @@ LAST_SECURITY_EVENTS_FILE="/var/log/last_security_events_check"
 LAST_LOGIND_CHECK_FILE="/var/log/last_logind_check"
 BAN_LIST_FILE="/var/log/ssh_bans.txt"
 
+# 1 = мониторинг + автобан IP (нужен ipset). 0 = только мониторинг и уведомления (логины, неудачи, sudo, logind и т.д. — без ipset/iptables).
+ENABLE_IP_BAN="1"
+
 # systemd-logind: 1 = включено, 0 = выключено
 ENABLE_LOGIND_MONITOR="1"
 LOGIND_NOTIFY_NEW="1"

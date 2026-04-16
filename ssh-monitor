@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="1.1.1-ipset"
+SSH_MONITOR_VERSION="1.1.2-ipset"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -67,6 +67,9 @@ BRUTE_NOTIFY_COOLDOWN_SEC=3600
 # ============================================
 # НАСТРОЙКИ БЛОКИРОВКИ IP
 # ============================================
+
+# 1 = мониторинг + автобан IP (ipset); 0 = только мониторинг и уведомления (ipset/iptables не трогаем).
+ENABLE_IP_BAN=1
 
 BAN_TIME=3600
 MAX_ATTEMPTS=3
@@ -174,6 +177,7 @@ load_config() {
  local cfg_brute_window_sec="${BRUTE_WINDOW_SEC}"
  local cfg_brute_min_fails="${BRUTE_MIN_FAILS}"
  local cfg_brute_notify_cooldown_sec="${BRUTE_NOTIFY_COOLDOWN_SEC}"
+ local cfg_enable_ip_ban="${ENABLE_IP_BAN:-1}"
  local cfg_ban_time="${BAN_TIME}"
  local cfg_max_attempts="${MAX_ATTEMPTS}"
  local cfg_ban_check_interval="${BAN_CHECK_INTERVAL}"
@@ -234,6 +238,7 @@ load_config() {
  BRUTE_WINDOW_SEC="${BRUTE_WINDOW_SEC:-$cfg_brute_window_sec}"
  BRUTE_MIN_FAILS="${BRUTE_MIN_FAILS:-$cfg_brute_min_fails}"
  BRUTE_NOTIFY_COOLDOWN_SEC="${BRUTE_NOTIFY_COOLDOWN_SEC:-$cfg_brute_notify_cooldown_sec}"
+ ENABLE_IP_BAN="${ENABLE_IP_BAN:-$cfg_enable_ip_ban}"
  BAN_TIME="${BAN_TIME:-$cfg_ban_time}"
  MAX_ATTEMPTS="${MAX_ATTEMPTS:-$cfg_max_attempts}"
  BAN_CHECK_INTERVAL="${BAN_CHECK_INTERVAL:-$cfg_ban_check_interval}"
@@ -253,6 +258,13 @@ load_config() {
  MAIL_TO="$(trim_value "${MAIL_TO:-$cfg_mail_to}")"
  MAIL_SMTP_STARTTLS="${MAIL_SMTP_STARTTLS:-$cfg_mail_smtp_starttls}"
  MAIL_SMTP_SSL="${MAIL_SMTP_SSL:-$cfg_mail_smtp_ssl}"
+
+ local _eib
+ _eib="$(trim_value "${ENABLE_IP_BAN:-1}")"
+ case "${_eib,,}" in
+ 0 | no | off | false) ENABLE_IP_BAN=0 ;;
+ *) ENABLE_IP_BAN=1 ;;
+ esac
 }
 
 # Дата/время для ежедневного отчёта (час DAILY_REPORT_HOUR и «сегодня» в LAST_REPORT_FILE).
@@ -335,9 +347,9 @@ validate_config() {
  validate_numeric_or_default "BRUTE_NOTIFY_COOLDOWN_SEC" "3600"
  validate_numeric_or_default "MAIL_SMTP_PORT" "587"
  validate_numeric_or_default "IPSET_MAXELEM" "1048576"
- if [ "${CHECK_CONFIG_ONLY:-0}" != "1" ] && [ "${DRY_RUN:-0}" != "1" ]; then
+ if [ "${ENABLE_IP_BAN:-1}" = "1" ] && [ "${CHECK_CONFIG_ONLY:-0}" != "1" ] && [ "${DRY_RUN:-0}" != "1" ]; then
  if ! command -v ipset >/dev/null 2>&1; then
- printf '%s\n' 'Требуется утилита ipset (например: apt install ipset)' >&2
+ printf '%s\n' 'Включён автобан IP (ENABLE_IP_BAN=1): требуется утилита ipset (например: apt install ipset)' >&2
  exit 1
  fi
  fi
@@ -721,6 +733,9 @@ ipset_timeout_clamp() {
 }
 
 ensure_ipset_and_iptables() {
+ if [ "${ENABLE_IP_BAN:-1}" != "1" ]; then
+ return 0
+ fi
  if [ "${DRY_RUN:-0}" = "1" ]; then
  return 0
  fi
@@ -804,6 +819,9 @@ do_ipset_del_ban() {
 
 is_ip_blocked() {
  local ip="$1"
+ if [ "${ENABLE_IP_BAN:-1}" != "1" ]; then
+ return 1
+ fi
  if [ "${DRY_RUN:-0}" = "1" ]; then
  return 1
  fi
@@ -825,6 +843,18 @@ block_ip() {
  fi
 
  if is_ip_blocked "$ip"; then
+ return 0
+ fi
+
+ if [ "${ENABLE_IP_BAN:-1}" != "1" ]; then
+ local ban_time_hours=$((BAN_TIME / 3600))
+ local message=" ⚠️ ЛИМИТ НЕУДАЧНЫХ SSH (автобан отключён в конфиге) "$'\n'
+ message="${message}🌐 IP: ${ip}"$'\n'
+ message="${message}👤 Попыток: ${attempts} (порог ${MAX_ATTEMPTS}; ENABLE_IP_BAN=0)"$'\n'
+ message="${message}ℹ️ ipset/firewall не меняются. При ENABLE_IP_BAN=1 бан был бы ~${ban_time_hours} ч."$'\n'
+ message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
+ notify_send "$message"
+ write_log "Порог неудачных SSH для $ip ($attempts попыток), автобан отключён (ENABLE_IP_BAN=0)"
  return 0
  fi
 
@@ -926,10 +956,12 @@ ban_list_rewrite_deduped() {
 # Ядро само удаляет элемент ipset по timeout; здесь только подчистка файла учёта
 # (без Telegram на каждый IP — иначе спам).
 unblock_expired_ips() {
+ [ "${ENABLE_IP_BAN:-1}" = "1" ] || return 0
  ban_list_rewrite_deduped 0
 }
 
 load_existing_bans() {
+ [ "${ENABLE_IP_BAN:-1}" = "1" ] || return 0
  if [ ! -f "$BAN_LIST_FILE" ]; then
  return
  fi
@@ -971,6 +1003,7 @@ load_existing_bans() {
 }
 
 verify_ban_list_vs_ipset() {
+ [ "${ENABLE_IP_BAN:-1}" = "1" ] || return 0
  [ ! -f "$BAN_LIST_FILE" ] && return 0
  local current_epoch
  current_epoch=$(date '+%s')
@@ -1552,6 +1585,8 @@ send_daily_report() {
  active_count=$(who 2>/dev/null | grep -c "." || echo "0")
 
  local active_bans=0
+ local ban_line
+ if [ "${ENABLE_IP_BAN:-1}" = "1" ]; then
  if command -v ipset >/dev/null 2>&1; then
  active_bans=$(ipset_active_ban_count)
  else
@@ -1565,6 +1600,10 @@ send_daily_report() {
  done <"$BAN_LIST_FILE"
  fi
  fi
+ ban_line="🚫 Активных банов (ipset): ${active_bans}"
+ else
+ ban_line="🚫 Автобан IP: отключён (ENABLE_IP_BAN=0)"
+ fi
 
  local message=" 📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ SSH МОНИТОРИНГА "$'\n'
  message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
@@ -1574,7 +1613,7 @@ send_daily_report() {
  message="${message} ✅ Успешных SSH подключений: ${successful_logins:-0}"$'\n'
  message="${message} ❌ Неудачных попыток SSH: ${failed_logins:-0}"$'\n'
  message="${message} ⚠️ Команд через sudo: ${sudo_commands:-0}"$'\n'
- message="${message} 🚫 Заблокировано IP: ${active_bans}"$'\n'
+ message="${message} ${ban_line}"$'\n'
  message="${message}"$'\n'
  message="${message} 🧾 ТОП-${DAILY_REPORT_TOP_IPS} IP ПО НЕУДАЧНЫМ ПОПЫТКАМ:"$'\n'
  if [ -n "$top_lines" ]; then
@@ -1709,7 +1748,11 @@ send_startup_notification() {
  message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время запуска: ${timestamp}"$'\n'
  message="${message}📊 Мониторинг SSH, SUDO и systemd-logind активирован"$'\n'
+ if [ "${ENABLE_IP_BAN:-1}" = "1" ]; then
  message="${message}🚫 Автоблокировка (ipset): после ${MAX_ATTEMPTS} попыток, timeout ${BAN_TIME} с ($IPSET_NAME_V4)"$'\n'
+ else
+ message="${message}🚫 Автоблокировка IP: выключена (ENABLE_IP_BAN=0), только уведомления"$'\n'
+ fi
  message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей"$'\n'
  message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"$'\n'
  message="${message}📢 Каналы уведомлений (все по списку): $(notify_chain_human)"
@@ -1739,8 +1782,12 @@ main() {
  fi
 
  load_whitelist_from_file
+ if [ "${ENABLE_IP_BAN:-1}" = "1" ]; then
  ensure_ipset_and_iptables || write_log "WARN: ensure_ipset_and_iptables завершился с ошибкой"
  load_existing_bans
+ else
+ write_log "ENABLE_IP_BAN=0: мониторинг и уведомления без ipset/автобана"
+ fi
  send_startup_notification
 
  local last_ban_check
@@ -1757,7 +1804,7 @@ main() {
 
  local current_time
  current_time=$(date '+%s')
- if [ $((current_time - last_ban_check)) -ge "$BAN_CHECK_INTERVAL" ]; then
+ if [ "${ENABLE_IP_BAN:-1}" = "1" ] && [ $((current_time - last_ban_check)) -ge "$BAN_CHECK_INTERVAL" ]; then
  unblock_expired_ips
  verify_ban_list_vs_ipset
  last_ban_check=$current_time
@@ -1782,6 +1829,7 @@ run_check_config() {
  printf 'SSH_ACCEPT_NOTIFY_DEDUP_SEC=%s\n' "${SSH_ACCEPT_NOTIFY_DEDUP_SEC:-5}"
  printf 'DAILY_REPORT_TOP_IPS=%s\n' "$DAILY_REPORT_TOP_IPS"
  printf 'BRUTE_WINDOW_SEC=%s BRUTE_MIN_FAILS=%s\n' "$BRUTE_WINDOW_SEC" "$BRUTE_MIN_FAILS"
+ printf 'ENABLE_IP_BAN=%s (1=мониторинг+бан ipset, 0=только мониторинг и уведомления)\n' "${ENABLE_IP_BAN:-1}"
  printf 'IPSET_NAME_V4=%s IPSET_NAME_V6=%s IPSET_MAXELEM=%s\n' "$IPSET_NAME_V4" "$IPSET_NAME_V6" "$IPSET_MAXELEM"
  printf 'PROMETHEUS_TEXTFILE_DIR=%s\n' "${PROMETHEUS_TEXTFILE_DIR:-}"
  printf 'HEALTHCHECK_STATUS_FILE=%s\n' "${HEALTHCHECK_STATUS_FILE:-}"
@@ -1831,9 +1879,18 @@ mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 
 write_log "Конфигурация загружена из $CONFIG_FILE (или дефолты), версия ${SSH_MONITOR_VERSION:-?}, очередь оповещений: $(notify_chain_human)"
+if [ "${ENABLE_IP_BAN:-1}" = "1" ]; then
+ write_log "Режим: мониторинг + автобан IP (ENABLE_IP_BAN=1)"
+else
+ write_log "Режим: только мониторинг и уведомления (ENABLE_IP_BAN=0)"
+fi
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
+ if [ "${ENABLE_IP_BAN:-1}" = "1" ]; then
  write_log "Режим DRY-RUN: ipset/iptables не меняются, уведомления печатаются в stderr"
+ else
+ write_log "Режим DRY-RUN: уведомления печатаются в stderr"
+ fi
 fi
 
 main
