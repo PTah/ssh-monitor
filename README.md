@@ -1,6 +1,10 @@
 # ssh-monitor
 
-Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`systemd-logind`** (локальные/графические сессии и др.) с уведомлениями в **Telegram** и по **электронной почте (SMTP)**, опциональным резервным webhook, авто-блокировкой IP (IPv4 через `iptables`, IPv6 через `ip6tables` при наличии) и ежедневным отчётом.
+> **Эта папка (`Projects/ssh-monitor`):** основной файл **`ssh-monitor`** — сборка с **ipset** (автобан через набор `hash:ip timeout` и одно правило `-m set`, не отдельное правило на каждый IP). Нюансы установки и восстановления наборов: **`IPSET-NOTES.txt`**.
+
+Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`systemd-logind`** (локальные/графические сессии и др.) с уведомлениями в **Telegram** и по **электронной почте (SMTP)**, опциональным резервным webhook, авто-блокировкой IP (**ipset** + **iptables** / **ip6tables**) и ежедневным отчётом.
+
+**Системные пакеты и зависимости** (что поставить на сервер до запуска): пошагово в [docs/install-prerequisites.ru.md](docs/install-prerequisites.ru.md).
 
 ## Конфигурация
 
@@ -96,6 +100,8 @@ Bash-скрипт мониторинга **SSH**, **SUDO** и событий **`
 
 Команда **`ssh-monitor --check-config`** выводит актуальные значения, в том числе параметры logind.
 
+Ограничения на хостах **без journald** и нюансы **`/var/log/auth.log`**: см. раздел 4 в [docs/install-prerequisites.ru.md](docs/install-prerequisites.ru.md).
+
 ## Режимы запуска
 
 Обычный запуск (root):
@@ -132,13 +138,13 @@ make dist
 
 Появится файл `ssh-monitor-<версия>.tar.gz` (через `git archive`). Готовые архивы для установки без клона репозитория прикладываются к [релизам на GitHub](https://github.com/PTah/ssh-monitor/releases).
 
-## Автозапуск через systemd
+## Установка скрипта, конфигурации и systemd
 
 1. Скопируйте скрипт в постоянное место:
- - `sudo install -m 750 ./ssh-monitor /usr/local/bin/ssh-monitor`
-2. Убедитесь, что конфиг есть:
- - `sudo cp ./ssh-monitor.conf.example /etc/ssh-monitor.conf` (если еще не создан)
- - `sudo chmod 600 /etc/ssh-monitor.conf`
+   - `sudo install -m 750 ./ssh-monitor /usr/local/bin/ssh-monitor`
+2. Убедитесь, что конфиг создан (см. раздел **«Конфигурация»** выше):
+   - `sudo cp ./ssh-monitor.conf.example /etc/ssh-monitor.conf`
+   - `sudo chmod 600 /etc/ssh-monitor.conf`
 3. Создайте unit-файл `/etc/systemd/system/ssh-monitor.service`:
 
 ```ini
@@ -177,42 +183,10 @@ sudo journalctl -u ssh-monitor -f
 
 Пример для `logrotate` лежит в репозитории: `contrib/logrotate.d/ssh-monitor`. Скопируйте файл в `/etc/logrotate.d/` и при необходимости поправьте пути под ваши `LOG_FILE` / `WATCHDOG_LOG_FILE` и другие файлы состояния в `/var/log/` (в т.ч. `LAST_*`, если решите их ротировать отдельно).
 
-## Статистика без systemd (`journalctl`)
-
-Для корректного подсчёта событий за последние 24 часа по файлам `/var/log/auth.log*` рекомендуется наличие **Python 3** на сервере. При его отсутствии счётчики в ежедневном отчёте для «классического» syslog могут быть занижены (используется безопасный fallback).
-
-**Мониторинг `systemd-logind`** и другие части, использующие **`journalctl`**, на таких системах **не выполняются** или дают неполные данные — ориентируйтесь на окружение с **systemd** и доступным журналом.
-
 ## Watchdog (автоматическое восстановление)
 
-Watchdog проверяет:
+Watchdog проверяет активность `ssh-monitor.service` и актуальность heartbeat (`LAST_HEARTBEAT_FILE`). При сбое выполняет `systemctl restart` и отправляет уведомление (Telegram и при сбое — `BACKUP_WEBHOOK_URL`, если задан).
 
-- активен ли `ssh-monitor.service`;
-- не устарел ли heartbeat (`LAST_HEARTBEAT_FILE`).
-
-Если сервис неактивен или heartbeat старше `WATCHDOG_MAX_HEARTBEAT_AGE`, watchdog выполняет `systemctl restart` и отправляет уведомление (Telegram и при сбое — `BACKUP_WEBHOOK_URL`, если задан).
-
-### Установка watchdog
-
-1. Установите watchdog-скрипт:
- - `sudo install -m 750 ./ssh-monitor-watchdog /usr/local/bin/ssh-monitor-watchdog`
-2. Создайте unit и timer из примеров:
- - `sudo cp ./ssh-monitor-watchdog.service.example /etc/systemd/system/ssh-monitor-watchdog.service`
- - `sudo cp ./ssh-monitor-watchdog.timer.example /etc/systemd/system/ssh-monitor-watchdog.timer`
-3. Примените и запустите timer:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable ssh-monitor-watchdog.timer
-sudo systemctl start ssh-monitor-watchdog.timer
-```
-
-4. Проверка:
-
-```bash
-sudo systemctl status ssh-monitor-watchdog.timer
-sudo systemctl list-timers | grep ssh-monitor-watchdog
-sudo journalctl -u ssh-monitor-watchdog.service -f
-```
+Пошаговая установка скрипта **ssh-monitor-watchdog** и **timer** в **systemd**: раздел 6 в [docs/install-prerequisites.ru.md](docs/install-prerequisites.ru.md).
 
 **Ключевые темы (для поиска):** мониторинг **SSH** и **sshd**, **bash**-скрипт для **Linux**-сервера, уведомления в **Telegram** и по **SMTP** / электронной почте, **systemd-logind**, **sudo**, **journalctl**, **iptables** / **ip6tables**, автоматический **бан IP** и **whitelist**, **systemd** unit, **ежедневный отчёт**, **heartbeat**, **OpenSSH**, безопасность сервера, **Prometheus** textfile, опционально **watchdog** для сервиса.

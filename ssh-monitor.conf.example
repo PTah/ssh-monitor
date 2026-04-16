@@ -66,6 +66,11 @@ MAX_ATTEMPTS="3"
 BAN_CHECK_INTERVAL="60"
 MONITOR_INTERVAL="10"
 
+# --- ipset (скрипт в этой папке): имена наборов и лимит элементов. Пусто в конфиге = значения по умолчанию из скрипта.
+# IPSET_NAME_V4="ssh_monitor_ban"
+# IPSET_NAME_V6="ssh_monitor_ban_v6"
+# IPSET_MAXELEM="1048576"
+
 # Окно и порог для уведомления о возможном массовом брутфорсе (journalctl)
 BRUTE_WINDOW_SEC="900"
 BRUTE_MIN_FAILS="30"

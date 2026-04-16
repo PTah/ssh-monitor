@@ -1,0 +1,24 @@
+ssh-monitor (ветка ipset) — что сделать на сервере
+==================================================
+
+1) apt install ipset
+
+2) Скопируйте ssh-monitor в /usr/local/bin/ (или как у вас принято), права +x.
+
+3) Каталог /etc/iptables должен существовать, если нужен save правил:
+   mkdir -p /etc/iptables
+   Скрипт пишет:
+   - /etc/iptables/ipset.rules
+   - /etc/iptables/rules.v4 и rules.v6 (если есть iptables-save)
+
+4) Загрузка ipset после перезагрузки (Debian/Ubuntu, пример):
+   apt install ipset-persistent
+   либо свой systemd unit: ipset restore -f /etc/iptables/ipset.rules
+
+5) UFW / nftables: если фактический фильтр не iptables-nft совместимый с -m set,
+   правило может не примениться — проверяйте «iptables -L INPUT -n» и счётчики.
+
+6) С таймаутом ipset ядро само убирает IP из набора; скрипт лишь чистит файл бан-листа
+   и при расхождении восстанавливает элемент в ipset (verify_ban_list_vs_ipset).
+
+Версия скрипта: см. SSH_MONITOR_VERSION в начале файла.

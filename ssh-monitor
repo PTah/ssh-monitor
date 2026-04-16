@@ -7,7 +7,7 @@ IFS=$'\n\t'
 # ============================================
 
 CONFIG_FILE="/etc/ssh-monitor.conf"
-SSH_MONITOR_VERSION="1.0.0"
+SSH_MONITOR_VERSION="1.1.1-ipset"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -73,6 +73,12 @@ MAX_ATTEMPTS=3
 BAN_CHECK_INTERVAL=60
 MONITOR_INTERVAL=10
 BAN_LIST_FILE="/var/log/ssh_bans.txt"
+
+# Блокировка через ipset (одно правило iptables/ip6tables + таймаут элемента в ядре).
+# Имена наборов можно переопределить в /etc/ssh-monitor.conf
+IPSET_NAME_V4="ssh_monitor_ban"
+IPSET_NAME_V6="ssh_monitor_ban_v6"
+IPSET_MAXELEM=1048576
 
 WHITELIST_IPS=(
  "127.0.0.1"
@@ -173,6 +179,9 @@ load_config() {
  local cfg_ban_check_interval="${BAN_CHECK_INTERVAL}"
  local cfg_monitor_interval="${MONITOR_INTERVAL}"
  local cfg_ban_list_file="${BAN_LIST_FILE}"
+ local cfg_ipset_name_v4="${IPSET_NAME_V4:-ssh_monitor_ban}"
+ local cfg_ipset_name_v6="${IPSET_NAME_V6:-ssh_monitor_ban_v6}"
+ local cfg_ipset_maxelem="${IPSET_MAXELEM:-1048576}"
  local cfg_whitelist_ips_csv="${default_whitelist_ips_csv}"
  local cfg_whitelist_subnets_csv="${default_whitelist_subnets_csv}"
  local cfg_notify_order="${NOTIFY_ORDER:-}"
@@ -210,6 +219,9 @@ load_config() {
  PROMETHEUS_TEXTFILE_DIR="${PROMETHEUS_TEXTFILE_DIR:-$cfg_prometheus_textfile_dir}"
  HEALTHCHECK_STATUS_FILE="${HEALTHCHECK_STATUS_FILE:-$cfg_healthcheck_status_file}"
  BAN_LIST_FILE="${BAN_LIST_FILE:-$cfg_ban_list_file}"
+ IPSET_NAME_V4="${IPSET_NAME_V4:-$cfg_ipset_name_v4}"
+ IPSET_NAME_V6="${IPSET_NAME_V6:-$cfg_ipset_name_v6}"
+ IPSET_MAXELEM="${IPSET_MAXELEM:-$cfg_ipset_maxelem}"
 
  DAILY_REPORT_HOUR="${DAILY_REPORT_HOUR:-$cfg_daily_report_hour}"
  DAILY_REPORT_TOP_IPS="${DAILY_REPORT_TOP_IPS:-$cfg_daily_report_top_ips}"
@@ -322,6 +334,13 @@ validate_config() {
  validate_numeric_or_default "BRUTE_MIN_FAILS" "30"
  validate_numeric_or_default "BRUTE_NOTIFY_COOLDOWN_SEC" "3600"
  validate_numeric_or_default "MAIL_SMTP_PORT" "587"
+ validate_numeric_or_default "IPSET_MAXELEM" "1048576"
+ if [ "${CHECK_CONFIG_ONLY:-0}" != "1" ] && [ "${DRY_RUN:-0}" != "1" ]; then
+ if ! command -v ipset >/dev/null 2>&1; then
+ printf '%s\n' 'Требуется утилита ipset (например: apt install ipset)' >&2
+ exit 1
+ fi
+ fi
  refresh_notify_chain
  if [ "${#NOTIFY_CHAIN[@]}" -eq 0 ]; then
  printf '%s\n' 'Не настроен ни один канал отправки оповещений' >&2
@@ -665,72 +684,121 @@ is_whitelisted() {
 }
 
 # ============================================
-# iptables / ip6tables
+# ipset + одно правило iptables/ip6tables (без per-IP правил)
 # ============================================
+# Таймаут бана задаётся на элементе ipset: ядро само удаляет IP по истечении
+# времени. Файл BAN_LIST_FILE — для отчётов и восстановления после перезагрузки.
 
 is_ipv6() {
  [[ "$1" == *:* ]]
 }
 
-do_firewall_add_drop() {
- local ip="$1"
- if is_ipv6 "$ip"; then
- if command -v ip6tables >/dev/null 2>&1; then
- sudo ip6tables -I INPUT -s "$ip" -j DROP
- else
- write_log "WARN: IPv6 $ip — ip6tables недоступен, блокировка пропущена"
- return 1
- fi
- else
- do_iptables -I INPUT -s "$ip" -j DROP
- fi
-}
+# Верхняя граница timeout для ipset (секунды), см. ipset(8).
+IPSET_TIMEOUT_MAX=2147483
 
-do_firewall_del_drop() {
- local ip="$1"
- if is_ipv6 "$ip"; then
- if command -v ip6tables >/dev/null 2>&1; then
- sudo ip6tables -D INPUT -s "$ip" -j DROP
- fi
- else
- do_iptables -D INPUT -s "$ip" -j DROP
- fi
-}
-
-is_firewall_blocked() {
- local ip="$1"
- if is_ipv6 "$ip"; then
- if command -v ip6tables >/dev/null 2>&1; then
- sudo ip6tables -C INPUT -s "$ip" -j DROP >/dev/null 2>&1
- else
- return 1
- fi
- else
- do_iptables -C INPUT -s "$ip" -j DROP >/dev/null 2>&1
- fi
-}
-
-do_iptables() {
+run_priv() {
  if [ "${DRY_RUN:-0}" = "1" ]; then
- write_log "DRY-RUN: iptables $*"
+ write_log "DRY-RUN: $*"
  return 0
  fi
- sudo iptables "$@"
+ if [ "$EUID" -eq 0 ]; then
+ "$@"
+ else
+ sudo "$@"
+ fi
 }
 
-save_iptables_rules() {
+ipset_timeout_clamp() {
+ local t="${1:-$BAN_TIME}"
+ if ! [[ "$t" =~ ^[0-9]+$ ]]; then
+ t="$BAN_TIME"
+ fi
+ if [ "$t" -gt "$IPSET_TIMEOUT_MAX" ]; then
+ echo "$IPSET_TIMEOUT_MAX"
+ else
+ echo "$t"
+ fi
+}
+
+ensure_ipset_and_iptables() {
  if [ "${DRY_RUN:-0}" = "1" ]; then
  return 0
+ fi
+ if ! command -v ipset >/dev/null 2>&1; then
+ write_log "CRIT: ipset не найден; установите: apt install ipset"
+ return 1
+ fi
+
+ local maxt="$IPSET_TIMEOUT_MAX"
+ run_priv ipset -exist create "$IPSET_NAME_V4" hash:ip timeout "$maxt" maxelem "$IPSET_MAXELEM" || {
+ write_log "CRIT: не удалось создать ipset $IPSET_NAME_V4"
+ return 1
+ }
+
+ if command -v ip6tables >/dev/null 2>&1; then
+ run_priv ipset -exist create "$IPSET_NAME_V6" hash:ip family inet6 timeout "$maxt" maxelem "$IPSET_MAXELEM" || \
+ write_log "WARN: не удалось создать ipset $IPSET_NAME_V6 (IPv6 бан отключён)"
+ fi
+
+ if ! run_priv iptables -C INPUT -m set --match-set "$IPSET_NAME_V4" src -j DROP 2>/dev/null; then
+ run_priv iptables -I INPUT 1 -m set --match-set "$IPSET_NAME_V4" src -j DROP
+ write_log "Добавлено iptables: -m set --match-set $IPSET_NAME_V4 src -j DROP"
+ fi
+
+ if command -v ip6tables >/dev/null 2>&1 && ipset list "$IPSET_NAME_V6" >/dev/null 2>&1; then
+ if ! run_priv ip6tables -C INPUT -m set --match-set "$IPSET_NAME_V6" src -j DROP 2>/dev/null; then
+ run_priv ip6tables -I INPUT 1 -m set --match-set "$IPSET_NAME_V6" src -j DROP
+ write_log "Добавлено ip6tables: -m set --match-set $IPSET_NAME_V6 src -j DROP"
+ fi
+ fi
+
+ save_firewall_state
+ return 0
+}
+
+save_firewall_state() {
+ if [ "${DRY_RUN:-0}" = "1" ]; then
+ return 0
+ fi
+ if [ ! -d /etc/iptables ]; then
+ return 0
+ fi
+ if command -v ipset >/dev/null 2>&1; then
+ run_priv ipset save -f /etc/iptables/ipset.rules 2>/dev/null || true
  fi
  if command -v iptables-save >/dev/null 2>&1; then
- if [ -d /etc/iptables ]; then
- sudo iptables-save >/etc/iptables/rules.v4 2>/dev/null || true
- fi
+ run_priv iptables-save >/etc/iptables/rules.v4 2>/dev/null || true
  fi
  if command -v ip6tables-save >/dev/null 2>&1; then
- if [ -d /etc/iptables ]; then
- sudo ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || true
+ run_priv ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || true
  fi
+}
+
+do_ipset_add_ban() {
+ local ip="$1"
+ local t
+ t=$(ipset_timeout_clamp "${2:-$BAN_TIME}")
+
+ if is_ipv6 "$ip"; then
+ if ! ipset list "$IPSET_NAME_V6" >/dev/null 2>&1; then
+ write_log "WARN: IPv6 $ip — набор $IPSET_NAME_V6 недоступен, пропуск"
+ return 1
+ fi
+ run_priv ipset -exist del "$IPSET_NAME_V6" "$ip" 2>/dev/null || true
+ run_priv ipset add "$IPSET_NAME_V6" "$ip" timeout "$t" || return 1
+ else
+ run_priv ipset -exist del "$IPSET_NAME_V4" "$ip" 2>/dev/null || true
+ run_priv ipset add "$IPSET_NAME_V4" "$ip" timeout "$t" || return 1
+ fi
+ return 0
+}
+
+do_ipset_del_ban() {
+ local ip="$1"
+ if is_ipv6 "$ip"; then
+ run_priv ipset -exist del "$IPSET_NAME_V6" "$ip" 2>/dev/null || true
+ else
+ run_priv ipset -exist del "$IPSET_NAME_V4" "$ip" 2>/dev/null || true
  fi
 }
 
@@ -739,7 +807,12 @@ is_ip_blocked() {
  if [ "${DRY_RUN:-0}" = "1" ]; then
  return 1
  fi
- is_firewall_blocked "$ip"
+ if is_ipv6 "$ip"; then
+ ipset list "$IPSET_NAME_V6" >/dev/null 2>&1 || return 1
+ run_priv ipset test "$IPSET_NAME_V6" "$ip" >/dev/null 2>&1
+ else
+ run_priv ipset test "$IPSET_NAME_V4" "$ip" >/dev/null 2>&1
+ fi
 }
 
 block_ip() {
@@ -756,61 +829,104 @@ block_ip() {
  fi
 
  local ban_until=$(($(date '+%s') + BAN_TIME))
+ local t_use
+ t_use=$(ipset_timeout_clamp "$BAN_TIME")
 
- do_firewall_add_drop "$ip" || true
+ if ! do_ipset_add_ban "$ip" "$t_use"; then
+ write_log "CRIT: не удалось добавить $ip в ipset"
+ return 1
+ fi
 
  echo "$ip|$ban_until|$attempts|$(date '+%Y-%m-%d %H:%M:%S')" >>"$BAN_LIST_FILE"
 
- save_iptables_rules
+ save_firewall_state
 
  local ban_time_hours=$((BAN_TIME / 3600))
  local message=" 🚫 IP ЗАБЛОКИРОВАН АВТОМАТИЧЕСКИ "$'\n'
  message="${message}🌐 IP: ${ip}"$'\n'
  message="${message}📊 Неудачных попыток: ${attempts}"$'\n'
- message="${message}⏱️ Блокировка на: ${ban_time_hours} час(ов)"$'\n'
+ message="${message}⏱️ Блокировка на: ${ban_time_hours} час(ов) (ipset timeout)"$'\n'
  message="${message}🕐 Время: $(notification_date '+%d.%m.%Y %H:%M:%S')"
  notify_send "$message"
- write_log "AUTO-BAN: IP $ip заблокирован на $ban_time_hours часов ($attempts попыток)"
+ write_log "AUTO-BAN: IP $ip в ipset на $ban_time_hours ч. ($attempts попыток)"
+
+ # Один IP — одна строка: после истечения ipset-таймаута is_ip_blocked=0, а в файле
+ # бан ещё «действует» → повторный бан иначе дублировал бы строки.
+ ban_list_rewrite_deduped 0
 }
 
-unblock_expired_ips() {
- local temp_file
- temp_file=$(mktemp)
+# Ядро само удаляет элемент ipset по timeout; файл — учёт. Дубликаты возникают,
+# если ipset уже сбросил IP, а ban_until в файле ещё в будущем (повторный бан).
+# По каждому IP оставляем одну запись с максимальным ban_until; просроченные убираем.
+# $1=1 — не писать в лог (внутренний вызов из цикла проверки).
+ban_list_rewrite_deduped() {
+ local suppress_log="${1:-0}"
  local current_time
  current_time=$(date '+%s')
- local unblocked=0
 
  if [ ! -f "$BAN_LIST_FILE" ]; then
- return
+ return 0
  fi
 
- while IFS='|' read -r ip ban_until attempts ban_time; do
- if [ -n "$ip" ] && [ -n "$ban_until" ]; then
- if [ "$current_time" -ge "$ban_until" ]; then
- if is_ip_blocked "$ip"; then
- do_firewall_del_drop "$ip"
- write_log "UNBAN: IP $ip разблокирован (время блокировки истекло)"
+ declare -A best_until=()
+ declare -A best_line=()
 
- local message=" 🔓 IP РАЗБЛОКИРОВАН "$'\n'
- message="${message}🌐 IP: ${ip}"$'\n'
- message="${message}🕐 Время разблокировки: $(notification_date '+%d.%m.%Y %H:%M:%S')"
- notify_send "$message"
+ local ip ban_until attempts ban_time
+ while IFS='|' read -r ip ban_until attempts ban_time || [ -n "${ip:-}" ]; do
+ [ -z "${ip:-}" ] || [ -z "${ban_until:-}" ] && continue
+ [ "$current_time" -ge "$ban_until" ] && continue
 
- unblocked=$((unblocked + 1))
- fi
- else
- echo "$ip|$ban_until|$attempts|$ban_time" >>"$temp_file"
- fi
+ if [ -z "${best_until[$ip]:-}" ] || [ "$ban_until" -gt "${best_until[$ip]}" ]; then
+ best_until[$ip]=$ban_until
+ best_line[$ip]="${ip}|${ban_until}|${attempts}|${ban_time}"
  fi
  done <"$BAN_LIST_FILE"
 
- if [ $unblocked -gt 0 ]; then
- mv "$temp_file" "$BAN_LIST_FILE"
- save_iptables_rules
- write_log "Разблокировано $unblocked IP адресов"
- else
- rm -f "$temp_file"
+ local temp_file
+ temp_file=$(mktemp)
+ local sorted_ips k
+ sorted_ips=$(printf '%s\n' "${!best_line[@]}" | LC_ALL=C sort)
+ while IFS= read -r k; do
+ [ -z "$k" ] && continue
+ echo "${best_line[$k]}" >>"$temp_file"
+ done <<<"$sorted_ips"
+
+ if [ ! -s "$temp_file" ]; then
+ if [ -s "$BAN_LIST_FILE" ]; then
+ : >"$BAN_LIST_FILE"
+ if [ "$suppress_log" != "1" ]; then
+ write_log "Бан-лист: все записи просрочены — файл очищен"
  fi
+ fi
+ rm -f "$temp_file"
+ return 0
+ fi
+
+ if cmp -s "$BAN_LIST_FILE" "$temp_file" 2>/dev/null; then
+ rm -f "$temp_file"
+ return 0
+ fi
+ # Тот же набор активных банов, но другой порядок строк — без лишней перезаписи/лога.
+ if cmp -s <(LC_ALL=C sort "$BAN_LIST_FILE") <(LC_ALL=C sort "$temp_file") 2>/dev/null; then
+ rm -f "$temp_file"
+ return 0
+ fi
+
+ local old_lines new_lines
+ old_lines=$(wc -l <"$BAN_LIST_FILE" | tr -d ' ' || echo 0)
+ new_lines=$(wc -l <"$temp_file" | tr -d ' ' || echo 0)
+ mv "$temp_file" "$BAN_LIST_FILE"
+
+ if [ "$suppress_log" != "1" ]; then
+ write_log "Бан-лист нормализован: строк ${old_lines} → ${new_lines} (дубликаты IP объединены, просроченные удалены)"
+ fi
+ return 0
+}
+
+# Ядро само удаляет элемент ipset по timeout; здесь только подчистка файла учёта
+# (без Telegram на каждый IP — иначе спам).
+unblock_expired_ips() {
+ ban_list_rewrite_deduped 0
 }
 
 load_existing_bans() {
@@ -820,26 +936,41 @@ load_existing_bans() {
 
  local current_time
  current_time=$(date '+%s')
- local temp_file
- temp_file=$(mktemp)
+ declare -A best_until=()
+ declare -A best_line=()
 
- while IFS='|' read -r ip ban_until attempts ban_time; do
- if [ -n "$ip" ] && [ -n "$ban_until" ]; then
- if [ "$current_time" -lt "$ban_until" ]; then
- if ! is_ip_blocked "$ip"; then
- do_firewall_add_drop "$ip" || true
- write_log "Восстановлена блокировка IP $ip (истекает через $(((ban_until - current_time) / 60)) минут)"
- fi
- echo "$ip|$ban_until|$attempts|$ban_time" >>"$temp_file"
- fi
+ local ip ban_until attempts ban_time
+ while IFS='|' read -r ip ban_until attempts ban_time || [ -n "${ip:-}" ]; do
+ [ -z "${ip:-}" ] || [ -z "${ban_until:-}" ] && continue
+ [ "$current_time" -lt "$ban_until" ] || continue
+
+ if [ -z "${best_until[$ip]:-}" ] || [ "$ban_until" -gt "${best_until[$ip]}" ]; then
+ best_until[$ip]=$ban_until
+ best_line[$ip]="${ip}|${ban_until}|${attempts}|${ban_time}"
  fi
  done <"$BAN_LIST_FILE"
 
+ local temp_file
+ temp_file=$(mktemp)
+ local sorted_ips k remain t_use
+ sorted_ips=$(printf '%s\n' "${!best_line[@]}" | LC_ALL=C sort)
+ while IFS= read -r k; do
+ [ -z "$k" ] && continue
+ IFS='|' read -r ip ban_until attempts ban_time <<<"${best_line[$k]}"
+ remain=$((ban_until - current_time))
+ t_use=$(ipset_timeout_clamp "$remain")
+ if ! is_ip_blocked "$ip"; then
+ do_ipset_add_ban "$ip" "$t_use" || true
+ write_log "Восстановлен ipset-бан $ip на $((remain / 60)) мин (после перезапуска)"
+ fi
+ echo "${best_line[$k]}" >>"$temp_file"
+ done <<<"$sorted_ips"
+
  mv "$temp_file" "$BAN_LIST_FILE"
- save_iptables_rules
+ save_firewall_state
 }
 
-verify_ban_list_vs_firewall() {
+verify_ban_list_vs_ipset() {
  [ ! -f "$BAN_LIST_FILE" ] && return 0
  local current_epoch
  current_epoch=$(date '+%s')
@@ -847,10 +978,24 @@ verify_ban_list_vs_firewall() {
  [ -z "$ip" ] || [ -z "$ban_until" ] && continue
  if [ "$current_epoch" -lt "$ban_until" ]; then
  if ! is_ip_blocked "$ip"; then
- write_log "AUDIT: рассинхрон — IP $ip есть в бан-листе, но нет правила DROP в firewall"
+ write_log "AUDIT: рассинхрон — IP $ip в бан-листе, но нет в ipset; восстанавливаю"
+ local remain=$((ban_until - current_epoch))
+ do_ipset_add_ban "$ip" "$(ipset_timeout_clamp "$remain")" || true
  fi
  fi
  done <"$BAN_LIST_FILE"
+}
+
+ipset_active_ban_count() {
+ local n n6
+ n=$(ipset list "$IPSET_NAME_V4" 2>/dev/null | awk '/^Number of entries:/{print $4; exit}')
+ n="${n:-0}"
+ n6=0
+ if ipset list "$IPSET_NAME_V6" >/dev/null 2>&1; then
+ n6=$(ipset list "$IPSET_NAME_V6" 2>/dev/null | awk '/^Number of entries:/{print $4; exit}')
+ fi
+ n6="${n6:-0}"
+ echo $((n + n6))
 }
 
 load_whitelist_from_file() {
@@ -1407,6 +1552,9 @@ send_daily_report() {
  active_count=$(who 2>/dev/null | grep -c "." || echo "0")
 
  local active_bans=0
+ if command -v ipset >/dev/null 2>&1; then
+ active_bans=$(ipset_active_ban_count)
+ else
  local current_epoch
  current_epoch=$(date '+%s')
  if [ -f "$BAN_LIST_FILE" ]; then
@@ -1415,6 +1563,7 @@ send_daily_report() {
  active_bans=$((active_bans + 1))
  fi
  done <"$BAN_LIST_FILE"
+ fi
  fi
 
  local message=" 📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ SSH МОНИТОРИНГА "$'\n'
@@ -1560,7 +1709,7 @@ send_startup_notification() {
  message="${message}🖥️ Сервер: $(server_display_name_with_ip)"$'\n'
  message="${message}🕐 Время запуска: ${timestamp}"$'\n'
  message="${message}📊 Мониторинг SSH, SUDO и systemd-logind активирован"$'\n'
- message="${message}🚫 Автоблокировка IP после ${MAX_ATTEMPTS} попыток на ${BAN_TIME} секунд"$'\n'
+ message="${message}🚫 Автоблокировка (ipset): после ${MAX_ATTEMPTS} попыток, timeout ${BAN_TIME} с ($IPSET_NAME_V4)"$'\n'
  message="${message}⚪ Белый список: ${whitelist_count} IP/подсетей"$'\n'
  message="${message}❤️ Heartbeat будет отправляться каждые 12 часов"$'\n'
  message="${message}📢 Каналы уведомлений (все по списку): $(notify_chain_human)"
@@ -1590,6 +1739,7 @@ main() {
  fi
 
  load_whitelist_from_file
+ ensure_ipset_and_iptables || write_log "WARN: ensure_ipset_and_iptables завершился с ошибкой"
  load_existing_bans
  send_startup_notification
 
@@ -1609,7 +1759,7 @@ main() {
  current_time=$(date '+%s')
  if [ $((current_time - last_ban_check)) -ge "$BAN_CHECK_INTERVAL" ]; then
  unblock_expired_ips
- verify_ban_list_vs_firewall
+ verify_ban_list_vs_ipset
  last_ban_check=$current_time
  fi
 
@@ -1632,6 +1782,7 @@ run_check_config() {
  printf 'SSH_ACCEPT_NOTIFY_DEDUP_SEC=%s\n' "${SSH_ACCEPT_NOTIFY_DEDUP_SEC:-5}"
  printf 'DAILY_REPORT_TOP_IPS=%s\n' "$DAILY_REPORT_TOP_IPS"
  printf 'BRUTE_WINDOW_SEC=%s BRUTE_MIN_FAILS=%s\n' "$BRUTE_WINDOW_SEC" "$BRUTE_MIN_FAILS"
+ printf 'IPSET_NAME_V4=%s IPSET_NAME_V6=%s IPSET_MAXELEM=%s\n' "$IPSET_NAME_V4" "$IPSET_NAME_V6" "$IPSET_MAXELEM"
  printf 'PROMETHEUS_TEXTFILE_DIR=%s\n' "${PROMETHEUS_TEXTFILE_DIR:-}"
  printf 'HEALTHCHECK_STATUS_FILE=%s\n' "${HEALTHCHECK_STATUS_FILE:-}"
  printf 'ENABLE_LOGIND_MONITOR=%s LAST_LOGIND_CHECK_FILE=%s\n' "${ENABLE_LOGIND_MONITOR:-}" "${LAST_LOGIND_CHECK_FILE:-}"
@@ -1682,7 +1833,7 @@ touch "$LOG_FILE"
 write_log "Конфигурация загружена из $CONFIG_FILE (или дефолты), версия ${SSH_MONITOR_VERSION:-?}, очередь оповещений: $(notify_chain_human)"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
- write_log "Режим DRY-RUN: iptables/ip6tables не меняются, уведомления печатаются в stderr"
+ write_log "Режим DRY-RUN: ipset/iptables не меняются, уведомления печатаются в stderr"
 fi
 
 main
